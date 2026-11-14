@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Link from "next/link";
-import { Chess } from "lucide-react";
+import { Crown } from "lucide-react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -35,7 +35,7 @@ export default function RootLayout({
           <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
             <Link href="/" className="flex items-center gap-2 font-bold text-lg tracking-tight">
               <div className="w-8 h-8 rounded-md bg-[var(--accent)] flex items-center justify-center">
-                <Chess className="w-5 h-5 text-black" />
+                <Crown className="w-5 h-5 text-black" />
               </div>
               <span>
                 Chess<span className="text-[var(--accent)]">Arena</span>
