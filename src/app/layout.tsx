@@ -28,38 +28,94 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable}`}
+      style={{ height: "100%" }}
     >
-      <body className="min-h-full flex flex-col bg-[var(--background)] text-[var(--foreground)]">
-        <header className="border-b border-[var(--border)] bg-[var(--card)]/80 backdrop-blur sticky top-0 z-50">
-          <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
-            <Link href="/" className="flex items-center gap-2 font-bold text-lg tracking-tight">
-              <div className="w-8 h-8 rounded-md bg-[var(--accent)] flex items-center justify-center">
-                <Crown className="w-5 h-5 text-black" />
+      <body
+        style={{
+          minHeight: "100%",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--background)",
+          color: "var(--foreground)",
+          margin: 0,
+        }}
+      >
+        <header
+          style={{
+            borderBottom: "1px solid var(--border)",
+            background: "rgba(22, 22, 22, 0.9)",
+            backdropFilter: "blur(8px)",
+            position: "sticky",
+            top: 0,
+            zIndex: 50,
+          }}
+        >
+          <div
+            className="page-wrap"
+            style={{
+              height: "3.5rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <Link
+              href="/"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                fontWeight: 700,
+                fontSize: "1.125rem",
+                textDecoration: "none",
+                color: "inherit",
+              }}
+            >
+              <div
+                style={{
+                  width: "2rem",
+                  height: "2rem",
+                  borderRadius: "0.375rem",
+                  background: "var(--accent)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Crown className="w-5 h-5" style={{ color: "#000" }} />
               </div>
               <span>
-                Chess<span className="text-[var(--accent)]">Arena</span>
+                Chess<span style={{ color: "var(--accent)" }}>Arena</span>
               </span>
             </Link>
-            <nav className="flex items-center gap-1 sm:gap-2">
-              <Link href="/play/computer" className="btn-ghost text-sm">
+            <nav style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+              <Link href="/play/computer" className="btn-ghost">
                 vs Computer
               </Link>
-              <Link href="/play/online" className="btn-ghost text-sm">
+              <Link href="/play/online" className="btn-ghost">
                 Play Online
               </Link>
-              <Link href="/puzzles" className="btn-ghost text-sm">
+              <Link href="/puzzles" className="btn-ghost">
                 Puzzles
               </Link>
-              <Link href="/analysis" className="btn-ghost text-sm hidden sm:inline">
+              <Link href="/analysis" className="btn-ghost" style={{ display: "none" }}>
                 Analysis
               </Link>
             </nav>
           </div>
         </header>
-        <main className="flex-1">{children}</main>
-        <footer className="border-t border-[var(--border)] py-6 text-center text-sm text-[var(--muted)]">
-          <p>ChessArena · Built for players who love the game</p>
+        <main style={{ flex: 1 }}>{children}</main>
+        <footer
+          style={{
+            borderTop: "1px solid var(--border)",
+            padding: "1.5rem",
+            textAlign: "center",
+            fontSize: "0.875rem",
+            color: "var(--muted)",
+          }}
+        >
+          <p style={{ margin: 0 }}>ChessArena · Built for players who love the game</p>
         </footer>
       </body>
     </html>
