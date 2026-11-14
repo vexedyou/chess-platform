@@ -1,294 +1,483 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Chess, Move } from "chess.js";
 import ChessBoard from "@/components/ChessBoard";
-import { generateRoomCode } from "@/lib/utils";
-import { Users, Copy, Check, Link2, RotateCcw } from "lucide-react";
+import { Users, Copy, Check, Link2, RotateCcw, Loader2 } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 
-type GameState = {
+type PublicRoom = {
+  code: string;
   fen: string;
   history: string[];
   lastMove: { from: string; to: string } | null;
   status: string;
-  playerColor: "w" | "b" | null;
+  gameOver: boolean;
+  playerCount: number;
+  yourColor: "w" | "b" | null;
+  updatedAt: number;
 };
 
-export default function OnlinePlayPage() {
+function getOrCreatePlayerId(): string {
+  if (typeof window === "undefined") return "";
+  const key = "chess-player-id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = `p_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
+function OnlinePlayInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const roomFromUrl = searchParams.get("room");
 
-  const [roomCode, setRoomCode] = useState(roomFromUrl || "");
-  const [joined, setJoined] = useState(!!roomFromUrl);
-  const [fen, setFen] = useState(
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-  );
-  const [history, setHistory] = useState<string[]>([]);
-  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
-  const [status, setStatus] = useState("Waiting for opponent...");
-  const [playerColor, setPlayerColor] = useState<"w" | "b" | null>(null);
+  const [playerId, setPlayerId] = useState("");
+  const [joinInput, setJoinInput] = useState("");
+  const [room, setRoom] = useState<PublicRoom | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [gameOver, setGameOver] = useState(false);
   const chessRef = useRef(new Chess());
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastUpdatedRef = useRef(0);
   const boardWidth = useBoardWidth();
 
-  const storageKey = roomCode ? `chess-room-${roomCode}` : null;
-
-  const syncFromStorage = useCallback(() => {
-    if (!storageKey) return;
-    try {
-      const raw = localStorage.getItem(storageKey);
-      if (!raw) return;
-      const data: GameState = JSON.parse(raw);
-      if (data.fen !== fen) {
-        chessRef.current = new Chess(data.fen);
-        setFen(data.fen);
-        setHistory(data.history || []);
-        setLastMove(data.lastMove);
-        setStatus(data.status || "Playing");
-      }
-    } catch {
-      // ignore
-    }
-  }, [storageKey, fen]);
-
   useEffect(() => {
-    if (!joined || !storageKey) return;
+    setPlayerId(getOrCreatePlayerId());
+  }, []);
 
-    const existing = localStorage.getItem(storageKey);
-    if (!existing) {
-      setPlayerColor("w");
-      const initial: GameState = {
-        fen: chessRef.current.fen(),
-        history: [],
-        lastMove: null,
-        status: "Waiting for opponent to join...",
-        playerColor: "w",
-      };
-      localStorage.setItem(storageKey, JSON.stringify(initial));
-      setStatus("Share the room code. You are White.");
-    } else {
-      const data: GameState = JSON.parse(existing);
-      if (playerColor === null) {
-        setPlayerColor("b");
-        setStatus("You are Black. Waiting for White to move...");
-        data.status = "Both players connected. White to move.";
-        localStorage.setItem(storageKey, JSON.stringify(data));
+  const applyRoom = useCallback((data: PublicRoom) => {
+    if (data.updatedAt < lastUpdatedRef.current) return;
+    lastUpdatedRef.current = data.updatedAt;
+    try {
+      chessRef.current = new Chess(data.fen);
+    } catch {
+      // keep previous
+    }
+    setRoom(data);
+    setError("");
+  }, []);
+
+  // Join from URL
+  useEffect(() => {
+    if (!playerId || !roomFromUrl || room) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/rooms/${roomFromUrl}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId, action: "join" }),
+        });
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(data.error || "Failed to join");
+          return;
+        }
+        applyRoom(data);
+      } catch {
+        if (!cancelled) setError("Network error joining room");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      syncFromStorage();
-    }
-
-    pollRef.current = setInterval(syncFromStorage, 800);
+    })();
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      cancelled = true;
     };
-  }, [joined, storageKey, playerColor, syncFromStorage]);
+  }, [playerId, roomFromUrl, room, applyRoom]);
 
-  function createRoom() {
-    const code = generateRoomCode();
-    setRoomCode(code);
-    setJoined(true);
-    setPlayerColor("w");
-    router.replace(`/play/online?room=${code}`);
+  // Poll room state
+  useEffect(() => {
+    if (!room || !playerId) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/api/rooms/${room.code}?playerId=${encodeURIComponent(playerId)}`,
+          { cache: "no-store" }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        applyRoom(data);
+      } catch {
+        // ignore transient errors
+      }
+    }, 700);
+    return () => clearInterval(id);
+  }, [room?.code, playerId, applyRoom]);
+
+  async function createRoom() {
+    if (!playerId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to create room");
+        return;
+      }
+      applyRoom(data);
+      router.replace(`/play/online?room=${data.code}`);
+    } catch {
+      setError("Network error");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function joinRoom() {
-    if (!roomCode.trim()) return;
-    setJoined(true);
-    router.replace(`/play/online?room=${roomCode.trim().toUpperCase()}`);
+  async function joinRoom() {
+    const code = joinInput.trim().toUpperCase();
+    if (!code || !playerId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/rooms/${code}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId, action: "join" }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to join");
+        return;
+      }
+      applyRoom(data);
+      router.replace(`/play/online?room=${data.code}`);
+    } catch {
+      setError("Network error");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function handleMove(move: Move, newFen: string) {
-    if (!storageKey || !playerColor) return;
-    if (chessRef.current.turn() !== playerColor) return;
+  async function handleMove(move: Move, newFen: string) {
+    if (!room || !playerId || !room.yourColor) return;
+    if (chessRef.current.turn() !== room.yourColor) return;
 
-    chessRef.current = new Chess(newFen);
-    setFen(newFen);
-    setLastMove({ from: move.from, to: move.to });
-    const newHistory = [...history, move.san];
-    setHistory(newHistory);
-
-    let newStatus = "Opponent's turn";
-    if (chessRef.current.isCheckmate()) {
-      newStatus = "Checkmate! You win!";
-      setGameOver(true);
-    } else if (chessRef.current.isDraw()) {
-      newStatus = "Draw";
-      setGameOver(true);
+    const game = new Chess(newFen);
+    let status = "Opponent's turn";
+    let gameOver = false;
+    if (game.isCheckmate()) {
+      status = "Checkmate!";
+      gameOver = true;
+    } else if (game.isDraw()) {
+      status = game.isStalemate()
+        ? "Draw by stalemate"
+        : game.isThreefoldRepetition()
+        ? "Draw by repetition"
+        : game.isInsufficientMaterial()
+        ? "Draw by insufficient material"
+        : "Draw";
+      gameOver = true;
+    } else if (game.isCheck()) {
+      status = "Check!";
     }
 
-    const state: GameState = {
-      fen: newFen,
-      history: newHistory,
-      lastMove: { from: move.from, to: move.to },
-      status: newStatus,
-      playerColor,
-    };
-    localStorage.setItem(storageKey, JSON.stringify(state));
-    setStatus(newStatus);
+    // Optimistic update
+    chessRef.current = game;
+    setRoom((r) =>
+      r
+        ? {
+            ...r,
+            fen: newFen,
+            history: [...r.history, move.san],
+            lastMove: { from: move.from, to: move.to },
+            status,
+            gameOver,
+            updatedAt: Date.now(),
+          }
+        : r
+    );
+
+    try {
+      const res = await fetch(`/api/rooms/${room.code}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playerId,
+          action: "move",
+          fen: newFen,
+          san: move.san,
+          from: move.from,
+          to: move.to,
+          gameOver,
+          status,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) applyRoom(data);
+    } catch {
+      // polling will recover
+    }
   }
 
-  function handleGameOver(result: string) {
-    setGameOver(true);
-    if (result === "white" || result === "black") {
-      setStatus(
-        (result === "white" && playerColor === "w") ||
-          (result === "black" && playerColor === "b")
-          ? "You win by checkmate!"
-          : "You lost by checkmate"
-      );
-    } else {
-      setStatus(`Draw (${result})`);
+  async function newGame() {
+    if (!room || !playerId) return;
+    try {
+      const res = await fetch(`/api/rooms/${room.code}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId, action: "reset" }),
+      });
+      const data = await res.json();
+      if (res.ok) applyRoom(data);
+    } catch {
+      setError("Failed to reset");
     }
   }
 
   function copyCode() {
-    navigator.clipboard.writeText(roomCode);
+    if (!room) return;
+    navigator.clipboard.writeText(room.code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
 
   function copyLink() {
-    const url = `${window.location.origin}/play/online?room=${roomCode}`;
+    if (!room) return;
+    const url = `${window.location.origin}/play/online?room=${room.code}`;
     navigator.clipboard.writeText(url);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
 
-  function newGame() {
-    if (!storageKey) return;
-    const chess = new Chess();
-    chessRef.current = chess;
-    setFen(chess.fen());
-    setHistory([]);
-    setLastMove(null);
-    setGameOver(false);
-    const state: GameState = {
-      fen: chess.fen(),
-      history: [],
-      lastMove: null,
-      status: "New game started. White to move.",
-      playerColor,
-    };
-    localStorage.setItem(storageKey, JSON.stringify(state));
-    setStatus(state.status);
-  }
-
-  if (!joined) {
+  // Lobby
+  if (!room) {
     return (
-      <div className="max-w-md mx-auto px-4 py-16">
-        <div className="card p-8 text-center">
-          <div className="w-14 h-14 rounded-full bg-[var(--accent)]/15 flex items-center justify-center mx-auto mb-5">
-            <Users className="w-7 h-7 text-[var(--accent)]" />
+      <div
+        className="page-wrap"
+        style={{ maxWidth: 28 * 16, paddingTop: "4rem", paddingBottom: "4rem" }}
+      >
+        <div className="card" style={{ padding: "2rem", textAlign: "center" }}>
+          <div
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: "50%",
+              background: "rgba(129,182,76,0.15)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              margin: "0 auto 1.25rem",
+            }}
+          >
+            <Users style={{ width: 28, height: 28, color: "var(--accent)" }} />
           </div>
-          <h1 className="text-2xl font-bold mb-2">Play Online</h1>
-          <p className="text-[var(--muted)] text-sm mb-8 leading-relaxed">
-            Create a private room and share the code with a friend.
+          <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: "0 0 0.5rem" }}>
+            Play Online
+          </h1>
+          <p style={{ color: "var(--muted)", fontSize: "0.875rem", marginBottom: "2rem" }}>
+            Create a room and share the code or link with a friend.
           </p>
 
-          <button onClick={createRoom} className="btn-primary w-full mb-6">
-            Create New Room
+          {error && (
+            <p style={{ color: "#f87171", fontSize: "0.875rem", marginBottom: "1rem" }}>
+              {error}
+            </p>
+          )}
+
+          <button
+            onClick={createRoom}
+            className="btn-primary"
+            style={{ width: "100%", marginBottom: "1.5rem" }}
+            disabled={loading || !playerId}
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Creating...
+              </>
+            ) : (
+              "Create New Room"
+            )}
           </button>
 
-          <div className="relative mb-5">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-[var(--border)]" />
+          <div style={{ position: "relative", marginBottom: "1.25rem" }}>
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <div style={{ width: "100%", borderTop: "1px solid var(--border)" }} />
             </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-[var(--card)] px-3 text-[var(--muted)]">
+            <div style={{ position: "relative", display: "flex", justifyContent: "center" }}>
+              <span
+                style={{
+                  background: "var(--card)",
+                  padding: "0 0.75rem",
+                  fontSize: "0.75rem",
+                  color: "var(--muted)",
+                }}
+              >
                 or join existing
               </span>
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div style={{ display: "flex", gap: "0.5rem" }}>
             <input
               type="text"
-              value={roomCode}
-              onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
+              value={joinInput}
+              onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
               placeholder="ROOM CODE"
               maxLength={6}
-              className="flex-1 bg-[var(--background)] border border-[var(--border)] rounded-lg px-4 py-2.5 text-center font-mono tracking-widest uppercase focus:outline-none focus:border-[var(--accent)]"
+              style={{
+                flex: 1,
+                background: "var(--background)",
+                border: "1px solid var(--border)",
+                borderRadius: "0.5rem",
+                padding: "0.625rem 1rem",
+                textAlign: "center",
+                fontFamily: "monospace",
+                letterSpacing: "0.15em",
+                color: "var(--foreground)",
+                fontSize: "1rem",
+              }}
+              onKeyDown={(e) => e.key === "Enter" && joinRoom()}
             />
-            <button onClick={joinRoom} className="btn-secondary px-5">
+            <button onClick={joinRoom} className="btn-secondary" disabled={loading}>
               Join
             </button>
           </div>
-
-          <p className="text-xs text-[var(--muted)] mt-6 leading-relaxed">
-            Demo uses browser storage. Best for same-device testing. Real-time multiplayer needs a backend.
-          </p>
         </div>
       </div>
     );
   }
 
+  const turn = (() => {
+    try {
+      return new Chess(room.fen).turn();
+    } catch {
+      return "w";
+    }
+  })();
+
   const canMove =
-    !gameOver && playerColor !== null && chessRef.current.turn() === playerColor;
+    !room.gameOver &&
+    room.yourColor !== null &&
+    turn === room.yourColor &&
+    room.playerCount >= 2;
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      <div className="flex flex-col lg:flex-row gap-8 items-start">
-        <div className="board-container mx-auto lg:mx-0">
+    <div className="page-wrap" style={{ paddingTop: "2rem", paddingBottom: "3rem" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "2rem",
+          alignItems: "center",
+        }}
+        className="lg-row"
+      >
+        <style>{`
+          @media (min-width: 1024px) {
+            .lg-row { flex-direction: row !important; align-items: flex-start !important; }
+            .side-panel { width: 20rem !important; }
+          }
+        `}</style>
+
+        <div className="board-container">
           <ChessBoard
-            fen={fen}
-            orientation={playerColor === "b" ? "black" : "white"}
+            fen={room.fen}
+            orientation={room.yourColor === "b" ? "black" : "white"}
             onMove={handleMove}
-            onGameOver={handleGameOver}
             interactive={canMove}
-            lastMove={lastMove}
+            lastMove={room.lastMove}
             boardWidth={boardWidth}
           />
         </div>
 
-        <div className="w-full lg:w-80 space-y-4">
-          <div className="card p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <Users className="w-5 h-5 text-[var(--accent)]" />
-              <h2 className="font-semibold text-lg">Room {roomCode}</h2>
+        <div className="side-panel" style={{ width: "100%", maxWidth: 320 }}>
+          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <Users style={{ width: 20, height: 20, color: "var(--accent)" }} />
+              <h2 style={{ fontWeight: 600, fontSize: "1.125rem", margin: 0 }}>
+                Room {room.code}
+              </h2>
             </div>
 
-            <p className="text-sm font-medium mb-4">{status}</p>
+            <p style={{ fontSize: "0.875rem", fontWeight: 500, marginBottom: "0.75rem" }}>
+              {room.playerCount < 2
+                ? "Waiting for opponent to join..."
+                : room.status}
+            </p>
 
-            <div className="flex items-center gap-2 mb-4">
-              <span className="text-xs text-[var(--muted)]">You are</span>
-              <span className="text-sm font-semibold capitalize">
-                {playerColor === "w"
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem", fontSize: "0.875rem" }}>
+              <span style={{ color: "var(--muted)" }}>You are</span>
+              <strong>
+                {room.yourColor === "w"
                   ? "White"
-                  : playerColor === "b"
+                  : room.yourColor === "b"
                   ? "Black"
                   : "..."}
+              </strong>
+              <span style={{ color: "var(--muted)", marginLeft: "auto" }}>
+                {room.playerCount}/2 players
               </span>
             </div>
 
-            <div className="flex gap-2 mb-3">
-              <button onClick={copyCode} className="btn-secondary flex-1">
+            {room.playerCount >= 2 && !room.gameOver && (
+              <p style={{ fontSize: "0.8rem", color: "var(--muted)", marginBottom: "0.75rem" }}>
+                {turn === room.yourColor ? "Your turn" : "Opponent's turn"}
+              </p>
+            )}
+
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+              <button onClick={copyCode} className="btn-secondary" style={{ flex: 1 }}>
                 {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 Code
               </button>
-              <button onClick={copyLink} className="btn-secondary flex-1">
+              <button onClick={copyLink} className="btn-secondary" style={{ flex: 1 }}>
                 <Link2 className="w-4 h-4" /> Link
               </button>
             </div>
 
-            <button onClick={newGame} className="btn-ghost w-full">
+            <button onClick={newGame} className="btn-ghost" style={{ width: "100%" }}>
               <RotateCcw className="w-4 h-4" /> New Game
             </button>
           </div>
 
-          <div className="card p-5">
-            <h3 className="font-medium text-sm text-[var(--muted)] mb-3">Moves</h3>
-            {history.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No moves yet</p>
+          <div className="card" style={{ padding: "1.25rem" }}>
+            <h3
+              style={{
+                fontWeight: 500,
+                fontSize: "0.875rem",
+                color: "var(--muted)",
+                margin: "0 0 0.75rem",
+              }}
+            >
+              Moves
+            </h3>
+            {room.history.length === 0 ? (
+              <p style={{ fontSize: "0.875rem", color: "var(--muted)", margin: 0 }}>
+                No moves yet
+              </p>
             ) : (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm font-mono max-h-64 overflow-y-auto">
-                {history.map((san, i) => (
-                  <div key={i} className="flex gap-2">
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "0.25rem 1rem",
+                  fontFamily: "monospace",
+                  fontSize: "0.875rem",
+                  maxHeight: 256,
+                  overflowY: "auto",
+                }}
+              >
+                {room.history.map((san, i) => (
+                  <div key={i} style={{ display: "flex", gap: "0.35rem" }}>
                     {i % 2 === 0 && (
-                      <span className="text-[var(--muted)] w-6">
+                      <span style={{ color: "var(--muted)", width: 24 }}>
                         {Math.floor(i / 2) + 1}.
                       </span>
                     )}
@@ -315,4 +504,18 @@ function useBoardWidth() {
     return () => window.removeEventListener("resize", update);
   }, []);
   return width;
+}
+
+export default function OnlinePlayPage() {
+  return (
+    <Suspense
+      fallback={
+        <div style={{ padding: "3rem", textAlign: "center", color: "var(--muted)" }}>
+          Loading...
+        </div>
+      }
+    >
+      <OnlinePlayInner />
+    </Suspense>
+  );
 }

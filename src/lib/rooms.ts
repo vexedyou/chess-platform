@@ -81,7 +81,10 @@ export function getRoom(code: string): Room | null {
   return store.get(code.toUpperCase()) || null;
 }
 
-export function joinRoom(code: string, playerId: string): Room | { error: string } {
+export function joinRoom(
+  code: string,
+  playerId: string
+): Room | { error: string } {
   const room = getRoom(code);
   if (!room) return { error: "Room not found" };
 
@@ -96,7 +99,9 @@ export function joinRoom(code: string, playerId: string): Room | { error: string
     return { error: "Room is full" };
   }
 
-  const color: "w" | "b" = room.players.some((p) => p.color === "w") ? "b" : "w";
+  const color: "w" | "b" = room.players.some((p) => p.color === "w")
+    ? "b"
+    : "w";
   room.players.push({ id: playerId, color, lastSeen: Date.now() });
   room.status =
     room.players.length === 2
@@ -124,22 +129,22 @@ export function applyMove(
   const player = room.players.find((p) => p.id === playerId);
   if (!player) return { error: "You are not in this room" };
 
-  // Basic turn check from FEN side-to-move before the move was applied
-  // Client sends the NEW fen after the move
   room.fen = payload.fen;
-  room pe.history = [...room.history, payload.san];
+  room.history = [...room.history, payload.san];
   room.lastMove = { from: payload.from, to: payload.to };
   room.gameOver = !!payload.gameOver;
   room.status =
-    payload.status ||
-    (room.gameOver ? "Game over" : "Opponent's turn");
+    payload.status || (room.gameOver ? "Game over" : "Opponent's turn");
   room.updatedAt = Date.now();
   player.lastSeen = Date.now();
 
   return room;
 }
 
-export function resetRoom(code: string, playerId: string): Room | { error: string } {
+export function resetRoom(
+  code: string,
+  playerId: string
+): Room | { error: string } {
   const room = getRoom(code);
   if (!room) return { error: "Room not found" };
   if (!room.players.some((p) => p.id === playerId)) {
@@ -154,16 +159,6 @@ export function resetRoom(code: string, playerId: string): Room | { error: strin
     room.players.length === 2
       ? "New game. White to move."
       : "Waiting for opponent...";
-  room.updatedAt = Date.now();
-  return room;
-}
-
-export function heartbeat(code: string, playerId: string): Room | { error: string } {
-  const room = getRoom(code);
-  if (!room) return { error: "Room not found" };
-  const player = room.players.find((p) => p.id === playerId);
-  if (!player) return { error: "You are not in this room" };
-  player.lastSeen = Date.now();
   room.updatedAt = Date.now();
   return room;
 }
