@@ -3,29 +3,29 @@ import { Bot, Users, Puzzle, Search, Zap, Trophy } from "lucide-react";
 
 export default function HomePage() {
   return (
-    <div className="max-w-6xl mx-auto px-4 py-12 sm:py-20">
+    <div className="page-wrap" style={{ paddingTop: "3rem", paddingBottom: "4rem" }}>
       {/* Hero */}
-      <section className="text-center mb-16">
-        <h1 className="text-4xl sm:text-6xl font-bold tracking-tight mb-4">
+      <section className="hero">
+        <h1>
           Play Chess.{" "}
-          <span className="text-[var(--accent)]">Get Better.</span>
+          <span style={{ color: "var(--accent)" }}>Get Better.</span>
         </h1>
-        <p className="text-lg text-[var(--muted)] max-w-2xl mx-auto mb-8">
+        <p>
           Challenge the computer, solve tactics puzzles, analyze your games, or
           play friends online. Clean, fast, and focused on the game.
         </p>
-        <div className="flex flex-wrap justify-center gap-4">
-          <Link href="/play/computer" className="btn-primary text-base">
+        <div className="hero-actions">
+          <Link href="/play/computer" className="btn-primary">
             Play vs Computer
           </Link>
-          <Link href="/play/online" className="btn-secondary text-base">
+          <Link href="/play/online" className="btn-secondary">
             Play Online
           </Link>
         </div>
       </section>
 
       {/* Features grid */}
-      <section className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-16">
+      <section className="features-grid">
         <FeatureCard
           href="/play/computer"
           icon={<Bot className="w-6 h-6" />}
@@ -65,12 +65,10 @@ export default function HomePage() {
       </section>
 
       {/* CTA */}
-      <section className="card p-8 sm:p-12 text-center">
-        <h2 className="text-2xl font-bold mb-3">Ready to play?</h2>
-        <p className="text-[var(--muted)] mb-6">
-          Pick your mode and start a game right now.
-        </p>
-        <div className="flex flex-wrap justify-center gap-3">
+      <section className="cta-block">
+        <h2>Ready to play?</h2>
+        <p>Pick your mode and start a game right now.</p>
+        <div className="cta-actions">
           <Link href="/play/computer" className="btn-primary">
             vs Computer
           </Link>
@@ -98,15 +96,10 @@ function FeatureCard({
   description: string;
 }) {
   return (
-    <Link
-      href={href}
-      className="card p-6 hover:bg-[var(--card-hover)] transition-colors group"
-    >
-      <div className="w-11 h-11 rounded-lg bg-[var(--accent)]/15 text-[var(--accent)] flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
-        {icon}
-      </div>
-      <h3 className="font-semibold text-lg mb-2">{title}</h3>
-      <p className="text-sm text-[var(--muted)] leading-relaxed">{description}</p>
+    <Link href={href} className="feature-card">
+      <div className="feature-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{description}</p>
     </Link>
   );
 }
