@@ -11,25 +11,14 @@
   --border: #2a2a2a;
   --chess-green: #779556;
   --chess-cream: #ebecd0;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-hover: var(--card-hover);
-  --color-accent: var(--accent);
-  --color-accent-hover: var(--accent-hover);
-  --color-muted: var(--muted);
-  --color-border: var(--border);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), system-ui, sans-serif;
+  font-family: var(--font-sans);
 }
 
 /* Custom scrollbar */
@@ -48,12 +37,10 @@ body {
   background: #555;
 }
 
-/* Board container */
 .board-container {
   max-width: min(90vw, 560px);
 }
 
-/* Button styles */
 .btn-primary {
   background-color: var(--accent);
   color: black;
@@ -86,21 +73,19 @@ body {
   color: var(--muted);
   padding: 0.5rem 1rem;
   border-radius: 0.5rem;
-  transition: colors 0.2s;
+  transition: color 0.2s, background-color 0.2s;
 }
 .btn-ghost:hover {
   background-color: var(--card);
   color: white;
 }
 
-/* Card */
 .card {
   background-color: var(--card);
   border: 1px solid var(--border);
   border-radius: 0.75rem;
 }
 
-/* Animations */
 @keyframes pulse-soft {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
