@@ -5,20 +5,25 @@ import { Chess, Move } from "chess.js";
 import ChessBoard from "@/components/ChessBoard";
 import { Search, RotateCcw, ClipboardPaste } from "lucide-react";
 
+const START =
+  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
 export default function AnalysisPage() {
-  const [fen, setFen] = useState(
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-  );
+  const [fen, setFen] = useState(START);
   const [inputFen, setInputFen] = useState("");
-  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(
+    null
+  );
   const [history, setHistory] = useState<string[]>([]);
   const [orientation, setOrientation] = useState<"white" | "black">("white");
+  const [error, setError] = useState("");
   const boardWidth = useBoardWidth();
 
   function handleMove(move: Move, newFen: string) {
     setFen(newFen);
     setLastMove({ from: move.from, to: move.to });
     setHistory((h) => [...h, move.san]);
+    setError("");
   }
 
   function loadFen() {
@@ -28,23 +33,39 @@ export default function AnalysisPage() {
       setLastMove(null);
       setHistory([]);
       setInputFen(chess.fen());
+      setError("");
     } catch {
-      alert("Invalid FEN");
+      setError("Invalid FEN");
     }
   }
 
   function reset() {
-    const chess = new Chess();
-    setFen(chess.fen());
+    setFen(START);
     setLastMove(null);
     setHistory([]);
     setInputFen("");
+    setError("");
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      <div className="flex flex-col lg:flex-row gap-8 items-start">
-        <div className="board-container mx-auto lg:mx-0">
+    <div className="page-wrap" style={{ paddingTop: "1.5rem", paddingBottom: "2.5rem" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "1.5rem",
+          alignItems: "center",
+        }}
+        className="game-layout"
+      >
+        <style>{`
+          @media (min-width: 1024px) {
+            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; }
+            .game-side { width: 18rem !important; }
+          }
+        `}</style>
+
+        <div className="board-container">
           <ChessBoard
             fen={fen}
             orientation={orientation}
@@ -55,59 +76,115 @@ export default function AnalysisPage() {
           />
         </div>
 
-        <div className="w-full lg:w-80 space-y-4">
-          <div className="card p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Search className="w-5 h-5 text-[var(--accent)]" />
-              <h2 className="font-semibold text-lg">Analysis Board</h2>
+        <div className="game-side" style={{ width: "100%", maxWidth: 320 }}>
+          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <Search style={{ width: 20, height: 20, color: "var(--accent)" }} />
+              <h2 style={{ fontWeight: 600, fontSize: "1.1rem", margin: 0 }}>
+                Analysis
+              </h2>
             </div>
 
-            <p className="text-sm text-[var(--muted)] mb-4 leading-relaxed">
-              Explore any position. Make moves freely or load a FEN.
+            <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: "1rem" }}>
+              Move freely or load any position by FEN.
             </p>
 
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-[var(--muted)] uppercase tracking-wide">
-                  Load FEN
-                </label>
-                <textarea
-                  value={inputFen}
-                  onChange={(e) => setInputFen(e.target.value)}
-                  placeholder="Paste FEN here..."
-                  className="w-full mt-1.5 bg-[var(--background)] border border-[var(--border)] rounded-lg p-2.5 text-sm font-mono h-20 resize-none focus:outline-none focus:border-[var(--accent)]"
-                />
-                <button onClick={loadFen} className="btn-secondary w-full mt-2">
-                  <ClipboardPaste className="w-4 h-4" /> Load Position
-                </button>
-              </div>
+            <label
+              style={{
+                fontSize: "0.7rem",
+                color: "var(--muted)",
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              Load FEN
+            </label>
+            <textarea
+              value={inputFen}
+              onChange={(e) => setInputFen(e.target.value)}
+              placeholder="Paste FEN here..."
+              style={{
+                width: "100%",
+                marginTop: "0.35rem",
+                background: "var(--background)",
+                border: "1px solid var(--border)",
+                borderRadius: "0.5rem",
+                padding: "0.6rem",
+                fontSize: "0.8rem",
+                fontFamily: "monospace",
+                height: 72,
+                resize: "none",
+                color: "var(--foreground)",
+                boxSizing: "border-box",
+              }}
+            />
+            {error && (
+              <p style={{ color: "#f87171", fontSize: "0.8rem", margin: "0.35rem 0 0" }}>
+                {error}
+              </p>
+            )}
+            <button
+              onClick={loadFen}
+              className="btn-secondary"
+              style={{ width: "100%", marginTop: "0.5rem" }}
+            >
+              <ClipboardPaste className="w-4 h-4" /> Load Position
+            </button>
 
-              <div className="flex gap-2">
-                <button onClick={reset} className="btn-secondary flex-1">
-                  <RotateCcw className="w-4 h-4" /> Reset
-                </button>
-                <button
-                  onClick={() =>
-                    setOrientation((o) => (o === "white" ? "black" : "white"))
-                  }
-                  className="btn-secondary flex-1"
-                >
-                  Flip Board
-                </button>
-              </div>
+            <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.5rem" }}>
+              <button onClick={reset} className="btn-secondary" style={{ flex: 1 }}>
+                <RotateCcw className="w-4 h-4" /> Reset
+              </button>
+              <button
+                onClick={() =>
+                  setOrientation((o) => (o === "white" ? "black" : "white"))
+                }
+                className="btn-secondary"
+                style={{ flex: 1 }}
+              >
+                Flip
+              </button>
             </div>
           </div>
 
-          <div className="card p-5">
-            <h3 className="font-medium text-sm text-[var(--muted)] mb-3">Move history</h3>
+          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+            <h3
+              style={{
+                fontWeight: 500,
+                fontSize: "0.8rem",
+                color: "var(--muted)",
+                margin: "0 0 0.75rem",
+              }}
+            >
+              Moves
+            </h3>
             {history.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No moves yet</p>
+              <p style={{ fontSize: "0.875rem", color: "var(--muted)", margin: 0 }}>
+                No moves yet
+              </p>
             ) : (
-              <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm font-mono max-h-48 overflow-y-auto">
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.35rem 0.75rem",
+                  fontFamily: "monospace",
+                  fontSize: "0.85rem",
+                  maxHeight: 200,
+                  overflowY: "auto",
+                }}
+              >
                 {history.map((san, i) => (
                   <span key={i}>
                     {i % 2 === 0 && (
-                      <span className="text-[var(--muted)] mr-1">
+                      <span style={{ color: "var(--muted)", marginRight: 4 }}>
                         {Math.floor(i / 2) + 1}.
                       </span>
                     )}
@@ -118,9 +195,28 @@ export default function AnalysisPage() {
             )}
           </div>
 
-          <div className="card p-5">
-            <h3 className="font-medium text-sm text-[var(--muted)] mb-2">Current FEN</h3>
-            <p className="text-xs font-mono break-all text-[var(--muted)] select-all leading-relaxed">
+          <div className="card" style={{ padding: "1rem 1.25rem" }}>
+            <h3
+              style={{
+                fontWeight: 500,
+                fontSize: "0.8rem",
+                color: "var(--muted)",
+                margin: "0 0 0.5rem",
+              }}
+            >
+              FEN
+            </h3>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "0.7rem",
+                fontFamily: "monospace",
+                color: "var(--muted)",
+                wordBreak: "break-all",
+                lineHeight: 1.45,
+                userSelect: "all",
+              }}
+            >
               {fen}
             </p>
           </div>
@@ -134,7 +230,7 @@ function useBoardWidth() {
   const [width, setWidth] = useState(480);
   useEffect(() => {
     function update() {
-      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 520)));
+      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 540)));
     }
     update();
     window.addEventListener("resize", update);

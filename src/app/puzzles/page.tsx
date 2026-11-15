@@ -1,9 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Move } from "chess.js";
+import { Chess, Move } from "chess.js";
 import ChessBoard from "@/components/ChessBoard";
-import { PUZZLES, Puzzle, getRandomPuzzle } from "@/lib/puzzles";
+import {
+  Puzzle,
+  getRandomPuzzle,
+  movesMatch,
+  PUZZLES,
+} from "@/lib/puzzles";
 import { Lightbulb, SkipForward, Check, X, Puzzle as PuzzleIcon } from "lucide-react";
 
 export default function PuzzlesPage() {
@@ -11,13 +16,15 @@ export default function PuzzlesPage() {
   const [fen, setFen] = useState("");
   const [solutionIndex, setSolutionIndex] = useState(0);
   const [status, setStatus] = useState<"playing" | "solved" | "failed">("playing");
-  const [message, setMessage] = useState("Find the best move!");
-  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
+  const [message, setMessage] = useState("Find the best move");
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(
+    null
+  );
   const [showHint, setShowHint] = useState(false);
   const boardWidth = useBoardWidth();
 
-  const loadPuzzle = useCallback((p?: Puzzle) => {
-    const selected = p || getRandomPuzzle();
+  const loadPuzzle = useCallback((excludeId?: string) => {
+    const selected = getRandomPuzzle(excludeId);
     setPuzzle(selected);
     setFen(selected.fen);
     setSolutionIndex(0);
@@ -31,38 +38,104 @@ export default function PuzzlesPage() {
     loadPuzzle();
   }, [loadPuzzle]);
 
+  function playOpponentReply(chess: Chess, nextIndex: number, p: Puzzle) {
+    // In our puzzle format, odd indices after a player move can be opponent moves
+    // stored in the solution line (player, opp, player, ...)
+    if (nextIndex >= p.solution.length) return { chess, index: nextIndex };
+
+    // Auto-play consecutive "opponent" half-moves if FEN side matches expected
+    // Simpler approach: solution is only the player's moves; we don't auto-play.
+    // For multi-move lines that include opponent moves in solution array:
+    let idx = nextIndex;
+    let current = chess;
+
+    while (idx < p.solution.length) {
+      // Try if the next solution move is legal for the side to move — if so it might be opp reply
+      // Convention: solution alternates starting with player (side to move in initial FEN)
+      const expected = p.solution[idx];
+      const legal = current.moves({ verbose: true });
+      const match = legal.find((m) =>
+        movesMatch(
+          { san: m.san, from: m.from, to: m.to, promotion: m.promotion },
+          expected
+        )
+      );
+
+      // Only auto-play if this is an opponent move (not player's turn to find)
+      // Player moves are at even steps from start relative to player color turns.
+      // After player just moved, it's opponent's turn — auto play if solution continues.
+      if (!match) break;
+
+      // Check if this move is meant to be automatic (opponent):
+      // We treat every other move after the player's correct move as auto when present.
+      current = new Chess(current.fen());
+      current.move(match);
+      idx++;
+
+      // Stop after one opponent reply so player faces the next problem move
+      break;
+    }
+
+    return { chess: current, index: idx };
+  }
+
   function handleMove(move: Move, newFen: string) {
     if (!puzzle || status !== "playing") return;
 
     const expected = puzzle.solution[solutionIndex];
-    const isCorrect =
-      move.san === expected ||
-      move.lan === expected ||
-      `${move.from}${move.to}` === expected ||
-      `${move.from}${move.to}${move.promotion || ""}` === expected;
+    const ok = movesMatch(
+      {
+        san: move.san,
+        from: move.from,
+        to: move.to,
+        promotion: move.promotion,
+      },
+      expected
+    );
 
-    if (isCorrect) {
-      setFen(newFen);
-      setLastMove({ from: move.from, to: move.to });
-      const nextIndex = solutionIndex + 1;
-
-      if (nextIndex >= puzzle.solution.length) {
-        setStatus("solved");
-        setMessage("Correct! Puzzle solved.");
-      } else {
-        setSolutionIndex(nextIndex);
-        setMessage("Good! Keep going...");
-      }
-    } else {
+    if (!ok) {
       setStatus("failed");
-      setMessage(`Wrong move. Expected something like ${expected}`);
+      setMessage("Not the best move. Try the next puzzle or review the idea.");
+      return;
+    }
+
+    let chess = new Chess(newFen);
+    let nextIndex = solutionIndex + 1;
+    setLastMove({ from: move.from, to: move.to });
+
+    if (nextIndex >= puzzle.solution.length) {
+      setFen(newFen);
+      setSolutionIndex(nextIndex);
+      setStatus("solved");
+      setMessage("Correct! Puzzle solved.");
+      return;
+    }
+
+    // Auto-play opponent reply if present in solution line
+    const after = playOpponentReply(chess, nextIndex, puzzle);
+    chess = after.chess;
+    nextIndex = after.index;
+
+    setFen(chess.fen());
+    if (chess.history({ verbose: true }).length) {
+      const hist = chess.history({ verbose: true });
+      const last = hist[hist.length - 1];
+      if (last) setLastMove({ from: last.from, to: last.to });
+    }
+    setSolutionIndex(nextIndex);
+
+    if (nextIndex >= puzzle.solution.length) {
+      setStatus("solved");
+      setMessage("Correct! Puzzle solved.");
+    } else {
+      setMessage("Good! Keep going...");
     }
   }
 
   if (!puzzle) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh]">
-        <p className="text-[var(--muted)]">Loading puzzle...</p>
+      <div style={{ padding: "3rem", textAlign: "center", color: "var(--muted)" }}>
+        Loading puzzle...
       </div>
     );
   }
@@ -70,9 +143,24 @@ export default function PuzzlesPage() {
   const orientation = puzzle.fen.includes(" w ") ? "white" : "black";
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      <div className="flex flex-col lg:flex-row gap-8 items-start">
-        <div className="board-container mx-auto lg:mx-0">
+    <div className="page-wrap" style={{ paddingTop: "1.5rem", paddingBottom: "2.5rem" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "1.5rem",
+          alignItems: "center",
+        }}
+        className="game-layout"
+      >
+        <style>{`
+          @media (min-width: 1024px) {
+            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; }
+            .game-side { width: 18rem !important; }
+          }
+        `}</style>
+
+        <div className="board-container">
           <ChessBoard
             fen={fen}
             orientation={orientation}
@@ -83,21 +171,44 @@ export default function PuzzlesPage() {
           />
         </div>
 
-        <div className="w-full lg:w-80 space-y-4">
-          <div className="card p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <PuzzleIcon className="w-5 h-5 text-[var(--accent)]" />
-              <h2 className="font-semibold text-lg">Tactics Puzzle</h2>
+        <div className="game-side" style={{ width: "100%", maxWidth: 320 }}>
+          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <PuzzleIcon style={{ width: 20, height: 20, color: "var(--accent)" }} />
+              <h2 style={{ fontWeight: 600, fontSize: "1.1rem", margin: 0 }}>
+                Tactics
+              </h2>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 mb-3">
-              <span className="text-xs px-2 py-0.5 rounded-full bg-[var(--card-hover)] text-[var(--muted)]">
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.75rem" }}>
+              <span
+                style={{
+                  fontSize: "0.7rem",
+                  padding: "0.15rem 0.5rem",
+                  borderRadius: 999,
+                  background: "var(--card-hover)",
+                  color: "var(--muted)",
+                }}
+              >
                 {puzzle.rating}
               </span>
               {puzzle.themes.map((t) => (
                 <span
                   key={t}
-                  className="text-xs px-2 py-0.5 rounded-full bg-[var(--accent)]/15 text-[var(--accent)]"
+                  style={{
+                    fontSize: "0.7rem",
+                    padding: "0.15rem 0.5rem",
+                    borderRadius: 999,
+                    background: "rgba(129,182,76,0.15)",
+                    color: "var(--accent)",
+                  }}
                 >
                   {t}
                 </span>
@@ -105,43 +216,52 @@ export default function PuzzlesPage() {
             </div>
 
             <p
-              className={`text-sm font-medium mb-4 flex items-start gap-1.5 ${
-                status === "solved"
-                  ? "text-green-400"
-                  : status === "failed"
-                  ? "text-red-400"
-                  : "text-white"
-              }`}
+              style={{
+                fontSize: "0.9rem",
+                fontWeight: 500,
+                marginBottom: "1rem",
+                color:
+                  status === "solved"
+                    ? "#4ade80"
+                    : status === "failed"
+                    ? "#f87171"
+                    : undefined,
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "0.35rem",
+              }}
             >
-              {status === "solved" && <Check className="w-4 h-4 mt-0.5 shrink-0" />}
-              {status === "failed" && <X className="w-4 h-4 mt-0.5 shrink-0" />}
+              {status === "solved" && <Check className="w-4 h-4" style={{ marginTop: 2 }} />}
+              {status === "failed" && <X className="w-4 h-4" style={{ marginTop: 2 }} />}
               {message}
             </p>
 
-            <div className="flex flex-col gap-2">
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
               {status === "playing" && (
-                <button
-                  onClick={() => setShowHint(true)}
-                  className="btn-secondary w-full"
-                >
+                <button onClick={() => setShowHint(true)} className="btn-secondary" style={{ width: "100%" }}>
                   <Lightbulb className="w-4 h-4" /> Hint
                 </button>
               )}
-              <button onClick={() => loadPuzzle()} className="btn-primary w-full">
+              <button
+                onClick={() => loadPuzzle(puzzle.id)}
+                className="btn-primary"
+                style={{ width: "100%" }}
+              >
                 <SkipForward className="w-4 h-4" /> Next Puzzle
               </button>
             </div>
 
             {showHint && status === "playing" && (
-              <p className="mt-3 text-sm text-[var(--muted)] leading-relaxed">
-                Hint: Look for a {puzzle.themes[0] || "tactical idea"}. Focus on checks, captures, and threats.
+              <p style={{ marginTop: "0.75rem", fontSize: "0.85rem", color: "var(--muted)" }}>
+                Look for {puzzle.themes[0] || "a tactic"}. Checks, captures, and threats first.
               </p>
             )}
           </div>
 
-          <div className="card p-5">
-            <h3 className="font-medium text-sm text-[var(--muted)] mb-1">Puzzle set</h3>
-            <p className="text-sm text-[var(--muted)]">{PUZZLES.length} puzzles available</p>
+          <div className="card" style={{ padding: "1rem 1.25rem" }}>
+            <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--muted)" }}>
+              {PUZZLES.length} puzzles in the set
+            </p>
           </div>
         </div>
       </div>
@@ -153,7 +273,7 @@ function useBoardWidth() {
   const [width, setWidth] = useState(480);
   useEffect(() => {
     function update() {
-      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 520)));
+      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 540)));
     }
     update();
     window.addEventListener("resize", update);
