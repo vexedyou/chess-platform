@@ -39,11 +39,15 @@ export function generateRoomCode(): string {
 }
 
 export function topicFor(code: string): string {
-  return `pushingpawns/v1/${code.toUpperCase()}`;
+  return `pushingpawns/v2/${code.toUpperCase()}`;
 }
 
-/** Public EMQX broker over WebSocket (no account needed). */
-export const MQTT_URL = "wss://broker.emqx.io:8084/mqtt";
+/** Public brokers (WebSocket). Tried in order until one connects. */
+export const MQTT_URLS = [
+  "wss://broker.emqx.io:8084/mqtt",
+  "wss://test.mosquitto.org:8081/mqtt",
+  "wss://broker.hivemq.com:8884/mqtt",
+];
 
 export function makePlayerId(): string {
   try {
@@ -57,4 +61,8 @@ export function makePlayerId(): string {
   } catch {
     return "p_" + Math.random().toString(36).slice(2);
   }
+}
+
+export function hostKey(code: string) {
+  return "pp-host-" + code.toUpperCase();
 }
