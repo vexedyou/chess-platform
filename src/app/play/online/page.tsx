@@ -3,6 +3,13 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Chess, Move } from "chess.js";
 import ChessBoard from "@/components/ChessBoard";
+import MoveHistory, {
+  fenAfterMoves,
+  lastMoveAt,
+} from "@/components/MoveHistory";
+import GameBanner, { type BannerKind } from "@/components/GameBanner";
+import { playGameSound } from "@/lib/sounds";
+import { useBoardWidth } from "@/lib/useBoardWidth";
 import {
   Users,
   Copy,
@@ -39,15 +46,67 @@ function OnlinePlayInner() {
   const [game, setGame] = useState<GamePayload>(emptyGame());
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [viewIndex, setViewIndex] = useState(-1);
+  const [banner, setBanner] = useState<{
+    kind: BannerKind;
+    title: string;
+    subtitle?: string;
+  } | null>(null);
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   const gameRef = useRef(game);
-  const boardWidth = useBoardWidth();
+  const prevHistoryLen = useRef(0);
+  const boardWidth = useBoardWidth(720);
 
   useEffect(() => {
     gameRef.current = game;
   }, [game]);
+
+  // Sounds + banners when game state changes (local or remote)
+  useEffect(() => {
+    const len = game.history.length;
+    if (len > prevHistoryLen.current && len > 0) {
+      const san = game.history[len - 1] || "";
+      const capture = san.includes("x");
+      if (game.gameOver) {
+        // handled below
+      } else if (game.status.toLowerCase().includes("check")) {
+        playGameSound({ check: true });
+      } else {
+        playGameSound({ capture });
+      }
+    }
+    prevHistoryLen.current = len;
+
+    if (!game.gameOver) return;
+    if (!yourColor) return;
+
+    const status = game.status.toLowerCase();
+    if (status.includes("checkmate")) {
+      try {
+        const chess = new Chess(game.fen);
+        // side to move is the loser
+        const loser = chess.turn();
+        const youWon = loser !== yourColor;
+        setBanner({
+          kind: youWon ? "win" : "lose",
+          title: youWon ? "Checkmate — You win!" : "Checkmate",
+          subtitle: youWon ? "Great game." : "Opponent wins.",
+        });
+        playGameSound({ win: youWon, lose: !youWon });
+      } catch {
+        setBanner({ kind: "draw", title: game.status });
+      }
+    } else if (status.includes("draw")) {
+      setBanner({
+        kind: "draw",
+        title: "Draw",
+        subtitle: game.status,
+      });
+      playGameSound({ draw: true });
+    }
+  }, [game.fen, game.gameOver, game.history, game.status, yourColor]);
 
   const cleanup = useCallback(() => {
     try {
@@ -68,13 +127,12 @@ function OnlinePlayInner() {
 
   const send = useCallback((msg: P2PMessage) => {
     const conn = connRef.current;
-    if (conn?.open) {
-      conn.send(msg);
-    }
+    if (conn?.open) conn.send(msg);
   }, []);
 
   const applyRemoteGame = useCallback((g: GamePayload) => {
     setGame(g);
+    setViewIndex(-1);
   }, []);
 
   const wireConnection = useCallback(
@@ -87,7 +145,6 @@ function OnlinePlayInner() {
         setError("");
 
         if (asRole === "host") {
-          // Host is white; send current board so guest syncs
           const payload = {
             ...gameRef.current,
             status:
@@ -121,6 +178,7 @@ function OnlinePlayInner() {
           applyRemoteGame(msg.game);
           setConnected(true);
           setPhase("playing");
+          if (msg.type === "reset") setBanner(null);
         }
       });
 
@@ -148,12 +206,12 @@ function OnlinePlayInner() {
       setYourColor("w");
       setRoomCode(code);
       setConnected(false);
+      setBanner(null);
+      setViewIndex(-1);
       setGame(emptyGame("Share the code. Waiting for opponent..."));
 
       const { default: Peer } = await import("peerjs");
-      const peer = new Peer(roomPeerId(code), {
-        debug: 0,
-      });
+      const peer = new Peer(roomPeerId(code), { debug: 0 });
       peerRef.current = peer;
 
       peer.on("open", () => {
@@ -162,7 +220,6 @@ function OnlinePlayInner() {
       });
 
       peer.on("connection", (conn) => {
-        // Only one opponent
         if (connRef.current?.open) {
           conn.close();
           return;
@@ -174,8 +231,7 @@ function OnlinePlayInner() {
         const message = String(err?.type || err?.message || err);
         if (message.includes("unavailable-id") || message.includes("taken")) {
           setError("Room code in use. Creating a new one...");
-          const next = generateRoomCode();
-          void startHost(next);
+          void startHost(generateRoomCode());
           return;
         }
         setError("Could not create room. Check your connection and retry.");
@@ -194,19 +250,18 @@ function OnlinePlayInner() {
       setYourColor("b");
       setRoomCode(code);
       setConnected(false);
+      setBanner(null);
+      setViewIndex(-1);
       setGame(emptyGame("Connecting to host..."));
 
       const { default: Peer } = await import("peerjs");
-      const peer = new Peer({
-        debug: 0,
-      });
+      const peer = new Peer({ debug: 0 });
       peerRef.current = peer;
 
       peer.on("open", () => {
         const conn = peer.connect(roomPeerId(code), { reliable: true });
         wireConnection(conn, "guest");
 
-        // Timeout if host never answers
         setTimeout(() => {
           if (!connRef.current?.open) {
             setError(
@@ -228,20 +283,16 @@ function OnlinePlayInner() {
     [cleanup, router, wireConnection]
   );
 
-  // Auto-join from URL as guest if room present (guest path).
-  // Host also lands with ?room= after create — skip auto guest join if we are host.
   useEffect(() => {
     if (!roomFromUrl) return;
     if (role) return;
     if (phase !== "lobby") return;
-    // Opening a shared link → join as guest
     void startGuest(roomFromUrl.toUpperCase());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomFromUrl]);
 
-  async function handleMove(move: Move, newFen: string) {
-    if (!yourColor || game.gameOver) return;
-    if (!connected) return;
+  function handleMove(move: Move, newFen: string) {
+    if (!yourColor || game.gameOver || !connected) return;
 
     let chess: Chess;
     try {
@@ -250,8 +301,6 @@ function OnlinePlayInner() {
       return;
     }
 
-    // Enforce turn from the position we just moved into (side to move is opponent)
-    // Verify we were the side that moved: opposite of new turn
     const mover = chess.turn() === "w" ? "b" : "w";
     if (mover !== yourColor) return;
 
@@ -282,6 +331,7 @@ function OnlinePlayInner() {
     };
 
     setGame(next);
+    setViewIndex(-1);
     send({ type: "move", game: next });
   }
 
@@ -290,6 +340,8 @@ function OnlinePlayInner() {
       connected ? "New game. White to move." : "Waiting for opponent..."
     );
     setGame(next);
+    setViewIndex(-1);
+    setBanner(null);
     send({ type: "reset", game: next });
   }
 
@@ -315,10 +367,11 @@ function OnlinePlayInner() {
     setRoomCode("");
     setGame(emptyGame());
     setError("");
+    setBanner(null);
+    setViewIndex(-1);
     router.replace("/play/online");
   }
 
-  // —— Lobby ——
   if (phase === "lobby") {
     return (
       <div
@@ -351,18 +404,11 @@ function OnlinePlayInner() {
               lineHeight: 1.5,
             }}
           >
-            Direct connection between two browsers. Create a room and share the
-            link — moves sync in real time.
+            Create a room and share the link — moves sync live between browsers.
           </p>
 
           {error && (
-            <p
-              style={{
-                color: "#f87171",
-                fontSize: "0.875rem",
-                marginBottom: "1rem",
-              }}
-            >
+            <p style={{ color: "#f87171", fontSize: "0.875rem", marginBottom: "1rem" }}>
               {error}
             </p>
           )}
@@ -384,9 +430,7 @@ function OnlinePlayInner() {
                 alignItems: "center",
               }}
             >
-              <div
-                style={{ width: "100%", borderTop: "1px solid var(--border)" }}
-              />
+              <div style={{ width: "100%", borderTop: "1px solid var(--border)" }} />
             </div>
             <div
               style={{
@@ -461,7 +505,6 @@ function OnlinePlayInner() {
     );
   }
 
-  // —— Game ——
   let turn: "w" | "b" = "w";
   try {
     turn = new Chess(game.fen).turn();
@@ -469,60 +512,79 @@ function OnlinePlayInner() {
     /* keep w */
   }
 
+  const viewingPast =
+    viewIndex >= 0 && viewIndex < game.history.length - 1;
+  const displayFen = viewingPast
+    ? fenAfterMoves(game.history, viewIndex)
+    : game.fen;
+  const displayLast = viewingPast
+    ? lastMoveAt(game.history, viewIndex)
+    : game.lastMove;
+
   const canMove =
     connected &&
     !game.gameOver &&
+    !viewingPast &&
     yourColor !== null &&
     turn === yourColor;
 
   return (
     <div
       className="page-wrap"
-      style={{ paddingTop: "1.5rem", paddingBottom: "2.5rem" }}
+      style={{ paddingTop: "1.25rem", paddingBottom: "2rem" }}
     >
       <div
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: "1.5rem",
+          gap: "1.25rem",
           alignItems: "center",
         }}
         className="game-layout"
       >
         <style>{`
-          @media (min-width: 1024px) {
-            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; }
-            .game-side { width: 18rem !important; }
+          @media (min-width: 1100px) {
+            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; gap: 1.75rem !important; }
+            .game-side { width: 20rem !important; }
           }
         `}</style>
 
         <div className="board-container">
           <ChessBoard
-            fen={game.fen}
+            fen={displayFen}
             orientation={yourColor === "b" ? "black" : "white"}
             onMove={handleMove}
             interactive={canMove}
-            lastMove={game.lastMove}
+            lastMove={displayLast}
             boardWidth={boardWidth}
           />
         </div>
 
-        <div className="game-side" style={{ width: "100%", maxWidth: 320 }}>
+        <div className="game-side" style={{ width: "100%", maxWidth: 340 }}>
+          {banner && (
+            <GameBanner
+              kind={banner.kind}
+              title={banner.title}
+              subtitle={banner.subtitle}
+              actionLabel="New game"
+              onAction={newGame}
+              onDismiss={() => setBanner(null)}
+            />
+          )}
+
           <div
             className="card"
-            style={{ padding: "1.25rem", marginBottom: "1rem" }}
+            style={{ padding: "1.2rem", marginBottom: "0.85rem" }}
           >
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: "0.5rem",
-                marginBottom: "0.75rem",
+                marginBottom: "0.65rem",
               }}
             >
-              <Users
-                style={{ width: 20, height: 20, color: "var(--accent)" }}
-              />
+              <Users style={{ width: 20, height: 20, color: "var(--accent)" }} />
               <h2 style={{ fontWeight: 600, fontSize: "1.1rem", margin: 0 }}>
                 Room {roomCode}
               </h2>
@@ -535,7 +597,7 @@ function OnlinePlayInner() {
                 gap: "0.4rem",
                 fontSize: "0.8rem",
                 color: connected ? "var(--accent)" : "var(--muted)",
-                marginBottom: "0.65rem",
+                marginBottom: "0.55rem",
               }}
             >
               {connected ? (
@@ -546,21 +608,15 @@ function OnlinePlayInner() {
               {connected ? "Connected" : "Waiting for opponent…"}
             </div>
 
-            <p
-              style={{
-                fontSize: "0.9rem",
-                fontWeight: 500,
-                marginBottom: "0.75rem",
-              }}
-            >
-              {game.status}
+            <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.65rem" }}>
+              {viewingPast ? "Viewing past move" : game.status}
             </p>
 
             <div
               style={{
                 display: "flex",
                 gap: "0.5rem",
-                marginBottom: "0.75rem",
+                marginBottom: "0.65rem",
                 fontSize: "0.875rem",
               }}
             >
@@ -572,7 +628,7 @@ function OnlinePlayInner() {
                     ? "Black"
                     : "…"}
               </strong>
-              {connected && !game.gameOver && (
+              {connected && !game.gameOver && !viewingPast && (
                 <span style={{ color: "var(--muted)", marginLeft: "auto" }}>
                   {turn === yourColor ? "Your turn" : "Their turn"}
                 </span>
@@ -580,41 +636,17 @@ function OnlinePlayInner() {
             </div>
 
             {error && (
-              <p
-                style={{
-                  color: "#f87171",
-                  fontSize: "0.8rem",
-                  marginBottom: "0.75rem",
-                }}
-              >
+              <p style={{ color: "#f87171", fontSize: "0.8rem", marginBottom: "0.65rem" }}>
                 {error}
               </p>
             )}
 
-            <div
-              style={{
-                display: "flex",
-                gap: "0.4rem",
-                marginBottom: "0.5rem",
-              }}
-            >
-              <button
-                onClick={copyCode}
-                className="btn-secondary"
-                style={{ flex: 1 }}
-              >
-                {copied ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
+            <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.4rem" }}>
+              <button onClick={copyCode} className="btn-secondary" style={{ flex: 1 }}>
+                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 Code
               </button>
-              <button
-                onClick={copyLink}
-                className="btn-secondary"
-                style={{ flex: 1 }}
-              >
+              <button onClick={copyLink} className="btn-secondary" style={{ flex: 1 }}>
                 <Link2 className="w-4 h-4" /> Link
               </button>
             </div>
@@ -630,84 +662,28 @@ function OnlinePlayInner() {
             <button
               onClick={backToLobby}
               className="btn-ghost"
-              style={{ width: "100%", marginTop: "0.25rem" }}
+              style={{ width: "100%", marginTop: "0.15rem" }}
             >
               Leave room
             </button>
           </div>
 
-          <div className="card" style={{ padding: "1.25rem" }}>
-            <h3
-              style={{
-                fontWeight: 500,
-                fontSize: "0.8rem",
-                color: "var(--muted)",
-                margin: "0 0 0.75rem",
-              }}
-            >
-              Moves
-            </h3>
-            {game.history.length === 0 ? (
-              <p
-                style={{
-                  fontSize: "0.875rem",
-                  color: "var(--muted)",
-                  margin: 0,
-                }}
-              >
-                No moves yet
-              </p>
-            ) : (
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: "0.2rem 0.75rem",
-                  fontFamily: "monospace",
-                  fontSize: "0.85rem",
-                  maxHeight: 260,
-                  overflowY: "auto",
-                }}
-              >
-                {game.history.map((san, i) => (
-                  <div key={i} style={{ display: "flex", gap: "0.3rem" }}>
-                    {i % 2 === 0 && (
-                      <span style={{ color: "var(--muted)", minWidth: 20 }}>
-                        {Math.floor(i / 2) + 1}.
-                      </span>
-                    )}
-                    <span>{san}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <MoveHistory
+            history={game.history}
+            viewIndex={viewIndex}
+            onViewIndex={setViewIndex}
+          />
         </div>
       </div>
     </div>
   );
 }
 
-function useBoardWidth() {
-  const [width, setWidth] = useState(480);
-  useEffect(() => {
-    function update() {
-      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 540)));
-    }
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-  return width;
-}
-
 export default function OnlinePlayPage() {
   return (
     <Suspense
       fallback={
-        <div
-          style={{ padding: "3rem", textAlign: "center", color: "var(--muted)" }}
-        >
+        <div style={{ padding: "3rem", textAlign: "center", color: "var(--muted)" }}>
           Loading…
         </div>
       }
