@@ -29,6 +29,7 @@ function OnlinePlayInner() {
   const [roomCode, setRoomCode] = useState(roomFromUrl?.toUpperCase() || "");
   const [hostPeerId, setHostPeerId] = useState(hostIdFromUrl || "");
   const [joinInput, setJoinInput] = useState("");
+  const [showPaste, setShowPaste] = useState(false);
   const [role, setRole] = useState<"host" | "guest" | null>(null);
   const [yourColor, setYourColor] = useState<"w" | "b" | null>(null);
   const [connected, setConnected] = useState(false);
@@ -199,7 +200,6 @@ function OnlinePlayInner() {
           ...g,
           status: "Connection lost. Guest can rejoin with the same link.",
         }));
-        // Host keeps listening for a new connection; guest can hit Retry
       }
     });
 
@@ -230,7 +230,6 @@ function OnlinePlayInner() {
     setGame(emptyGame("Share the link. Waiting for opponent…"));
 
     const { default: Peer } = await import("peerjs");
-    // Random ID is far more reliable than custom room-based IDs on the public broker
     const peer = new Peer(PEER_OPTIONS);
     peerRef.current = peer;
 
@@ -311,7 +310,6 @@ function OnlinePlayInner() {
       );
 
       try {
-        // Close previous half-open conn before retry
         if (connRef.current) {
           try { connRef.current.close(); } catch { /* */ }
           connRef.current = null;
@@ -373,7 +371,6 @@ function OnlinePlayInner() {
     const code = roomFromUrl.toUpperCase();
 
     if (wasHost(code) && !hostIdFromUrl) {
-      // Old host tab refreshed without peer id — start fresh host session
       void startHost(code);
       return;
     }
@@ -388,7 +385,6 @@ function OnlinePlayInner() {
       return;
     }
 
-    // Room code only, no host id — cannot join reliably
     if (!hostIdFromUrl) {
       setError("This link is incomplete. Ask the host to share the full link (Copy Link).");
     }
@@ -457,7 +453,7 @@ function OnlinePlayInner() {
     setPhase("lobby");
     setRole(null);
     setYourColor(null);
-    setConnectedConnected(false);
+    setConnected(false);
     setRoomCode("");
     setHostPeerId("");
     setGame(emptyGame());
@@ -477,17 +473,16 @@ function OnlinePlayInner() {
           </div>
           <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: "0 0 0.5rem" }}>Play Online</h1>
           <p style={{ color: "var(--muted)", fontSize: "0.875rem", marginBottom: "1.75rem", lineHeight: 1.5 }}>
-            Create a room, then share the <strong>full link</strong> (not just the code). Keep the host tab open.
+            Create a room, then share the <strong>full link</strong> (use Copy Link). Keep the host tab open.
           </p>
           {error && <p style={{ color: "#f87171", fontSize: "0.875rem", marginBottom: "1rem" }}>{error}</p>}
-          <button onClick={() => void startHost(generateRoomCode())} className="btn-primary" style={{ width: "100%", marginBottom: "1.5rem" }}>
+          <button onClick={() => void startHost(generateRoomCode())} className="btn-primary" style={{ width: "100%", marginBottom: "1rem" }}>
             Create Room
           </button>
-          <p style={{ color: "var(--muted)", fontSize: "0.75rem", margin: 0, lineHeight: 1.45 }}>
-            Guests should open the shared link. Joining by code alone is no longer supported (it was a common cause of timeouts).
-          </p>
-          {joinInput && (
-            <div style={{ marginTop: "1rem" }}>
+          {!showPaste ? (
+            <button className="btn-ghost" onClick={() => setShowPaste(true)}>Paste invite link instead</button>
+          ) : (
+            <div>
               <input
                 type="text" value={joinInput}
                 onChange={(e) => setJoinInput(e.target.value)}
@@ -512,11 +507,6 @@ function OnlinePlayInner() {
                 Join from link
               </button>
             </div>
-          )}
-          {!joinInput && (
-            <button className="btn-ghost" style={{ marginTop: "1rem" }} onClick={() => setJoinInput(" ")}>
-              Paste invite link instead
-            </button>
           )}
         </div>
       </div>
@@ -596,7 +586,7 @@ function OnlinePlayInner() {
               </button>
             </div>
             <p style={{ fontSize: "0.7rem", color: "var(--muted)", margin: "0 0 0.5rem" }}>
-              Share the <strong>Link</strong> button (includes host id). Code alone will not connect.
+              Share the <strong>Link</strong> button (not just the code).
             </p>
             <button onClick={newGame} className="btn-ghost" style={{ width: "100%" }} disabled={!connected}>
               <RotateCcw className="w-4 h-4" /> New Game
