@@ -11,35 +11,31 @@ import {
   Users, Copy, Check, Link2, RotateCcw, Loader2, Wifi, WifiOff,
 } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
-import type { MqttClient } from "mqtt";
 import {
   emptyGame,
   generateRoomCode,
   hostKey,
   makePlayerId,
-  MQTT_URLS,
   topicFor,
   type GameState,
   type RoomMessage,
 } from "@/lib/mqtt-room";
+import { MiniMqtt, MQTT_URLS } from "@/lib/mini-mqtt";
 
 type Phase = "lobby" | "connecting" | "playing";
-type ConnectFn = (url: string, opts?: Record<string, unknown>) => MqttClient;
+type Mode = "http" | "mqtt";
 
-async function loadMqttConnect(): Promise<ConnectFn> {
-  try {
-    const mod = await import("mqtt/dist/mqtt.min");
-    const c =
-      (mod as { connect?: ConnectFn }).connect ||
-      (mod as { default?: { connect?: ConnectFn } }).default?.connect ||
-      (mod as unknown as ConnectFn);
-    if (typeof c === "function") return c;
-  } catch {
-    /* fall through */
-  }
-  const mod = await import("mqtt");
-  return mod.connect as unknown as ConnectFn;
-}
+type PublicRoom = {
+  code: string;
+  fen: string;
+  history: string[];
+  lastMove: { from: string; to: string } | null;
+  status: string;
+  gameOver: boolean;
+  playerCount: number;
+  yourColor: "w" | "b" | null;
+  updatedAt: number;
+};
 
 function OnlinePlayInner() {
   const searchParams = useSearchParams();
@@ -47,12 +43,11 @@ function OnlinePlayInner() {
   const roomFromUrl = searchParams.get("room");
 
   const [phase, setPhase] = useState<Phase>("lobby");
+  const [mode, setMode] = useState<Mode>("http");
   const [roomCode, setRoomCode] = useState(roomFromUrl?.toUpperCase() || "");
   const [joinInput, setJoinInput] = useState("");
-  const [role, setRole] = useState<"host" | "guest" | null>(null);
   const [yourColor, setYourColor] = useState<"w" | "b" | null>(null);
   const [connected, setConnected] = useState(false);
-  const [mqttReady, setMqttReady] = useState(false);
   const [game, setGame] = useState<GameState>(emptyGame());
   const [error, setError] = useState("");
   const [statusLine, setStatusLine] = useState("");
@@ -64,15 +59,14 @@ function OnlinePlayInner() {
     subtitle?: string;
   } | null>(null);
 
-  const clientRef = useRef<MqttClient | null>(null);
+  const mqttRef = useRef<MiniMqtt | null>(null);
   const gameRef = useRef(game);
   const roleRef = useRef<"host" | "guest" | null>(null);
-  const codeRef = useRef("");
   const playerIdRef = useRef("");
   const prevHistoryLen = useRef(0);
   const bootstrapped = useRef(false);
-  const intentionalClose = useRef(false);
-  const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastUpdatedRef = useRef(0);
   const boardWidth = useBoardWidth(720);
 
   useEffect(() => {
@@ -115,163 +109,165 @@ function OnlinePlayInner() {
     }
   }, [game, yourColor]);
 
-  const cleanup = useCallback(() => {
-    intentionalClose.current = true;
-    if (pingTimer.current) {
-      clearInterval(pingTimer.current);
-      pingTimer.current = null;
+  const stopPoll = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
-    const c = clientRef.current;
-    clientRef.current = null;
-    if (c) {
-      try {
-        c.end(true);
-      } catch {
-        /* */
-      }
-    }
-    setMqttReady(false);
-    setConnected(false);
   }, []);
 
-  useEffect(() => () => cleanup(), [cleanup]);
-
-  const publish = useCallback((msg: RoomMessage, code: string) => {
-    const c = clientRef.current;
-    if (!c || !c.connected) return;
+  const cleanup = useCallback(() => {
+    stopPoll();
     try {
-      c.publish(topicFor(code), JSON.stringify(msg), { qos: 0 });
+      mqttRef.current?.end();
     } catch {
       /* */
     }
+    mqttRef.current = null;
+  }, [stopPoll]);
+
+  useEffect(() => () => cleanup(), [cleanup]);
+
+  const applyHttpRoom = useCallback((data: PublicRoom) => {
+    if (data.updatedAt < lastUpdatedRef.current) return;
+    lastUpdatedRef.current = data.updatedAt;
+    setGame({
+      fen: data.fen,
+      history: data.history,
+      lastMove: data.lastMove,
+      status: data.status,
+      gameOver: data.gameOver,
+    });
+    setYourColor(data.yourColor);
+    setConnected(data.playerCount >= 2);
+    setRoomCode(data.code);
+    setPhase("playing");
+    setError("");
   }, []);
 
-  const wireClient = useCallback(
-    (client: MqttClient, normalized: string, asRole: "host" | "guest") => {
-      clientRef.current = client;
-      intentionalClose.current = false;
+  // —— HTTP mode (primary, always works for create) ——
+  const startHttpHost = useCallback(async () => {
+    cleanup();
+    setMode("http");
+    setPhase("connecting");
+    setStatusLine("Creating room…");
+    setError("");
+    setBanner(null);
+    setViewIndex(-1);
+    lastUpdatedRef.current = 0;
+    prevHistoryLen.current = 0;
+    roleRef.current = "host";
 
-      const myId = () => playerIdRef.current || makePlayerId();
-
-      const onReady = () => {
-        setMqttReady(true);
-        setStatusLine("");
-        setPhase("playing");
-        setError("");
-
-        client.subscribe(topicFor(normalized), { qos: 0 }, (err) => {
-          if (err) {
-            setError("Could not join room channel. Try again.");
-            return;
-          }
-          publish(
-            { type: "hello", role: asRole, playerId: myId() },
-            normalized
-          );
-          if (asRole === "host") {
-            setGame(emptyGame("Share the code. Waiting for opponent…"));
-          }
-
-          if (pingTimer.current) clearInterval(pingTimer.current);
-          pingTimer.current = setInterval(() => {
-            publish({ type: "ping", from: myId() }, normalized);
-          }, 5000);
-        });
-      };
-
-      if (client.connected) onReady();
-      else client.on("connect", onReady);
-
-      client.on("message", (_topic, buf) => {
-        let msg: RoomMessage;
+    const pid = playerIdRef.current || makePlayerId();
+    try {
+      const res = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playerId: pid }),
+      });
+      if (!res.ok) throw new Error("create failed");
+      const data = (await res.json()) as PublicRoom;
+      try {
+        sessionStorage.setItem(hostKey(data.code), "1");
+      } catch {
+        /* */
+      }
+      applyHttpRoom(data);
+      bootstrapped.current = true;
+      router.replace("/play/online?room=" + data.code);
+      stopPoll();
+      pollRef.current = setInterval(async () => {
         try {
-          msg = JSON.parse(buf.toString()) as RoomMessage;
+          const r = await fetch(
+            `/api/rooms/${data.code}?playerId=${encodeURIComponent(pid)}`,
+            { cache: "no-store" }
+          );
+          if (r.ok) applyHttpRoom((await r.json()) as PublicRoom);
         } catch {
-          return;
+          /* */
         }
-        if (!msg || typeof msg !== "object") return;
-        const id = myId();
+      }, 800);
+    } catch {
+      setError("Could not create room. Please try again.");
+      setPhase("lobby");
+    }
+  }, [applyHttpRoom, cleanup, router, stopPoll]);
 
-        if (msg.type === "ping") {
-          if (msg.from !== id) publish({ type: "pong", from: id }, normalized);
-          return;
-        }
-        if (msg.type === "pong") {
-          if (msg.from !== id) setConnected(true);
-          return;
-        }
-        if (msg.type === "hello") {
-          if (msg.playerId === id) return;
-          setConnected(true);
-          if (roleRef.current === "host") {
-            const payload: GameState = {
-              ...gameRef.current,
-              status:
-                gameRef.current.history.length === 0
-                  ? "Both connected. White to move."
-                  : gameRef.current.status,
-            };
-            setGame(payload);
-            publish({ type: "sync", game: payload, from: id }, normalized);
-          }
-          return;
-        }
-        if (msg.type === "sync" || msg.type === "move" || msg.type === "reset") {
-          if (msg.from === id) return;
-          setConnected(true);
-          setGame(msg.game);
-          setViewIndex(-1);
-          if (msg.type === "reset") setBanner(null);
-        }
-      });
-
-      client.on("error", () => {
-        if (!intentionalClose.current) {
-          setError("Connection error. You can still wait — it may recover.");
-        }
-      });
-
-      client.on("reconnect", () => {
-        if (!intentionalClose.current) setStatusLine("Reconnecting…");
-      });
-
-      client.on("close", () => {
-        if (!intentionalClose.current) {
-          setMqttReady(false);
-          setConnected(false);
-        }
-      });
-    },
-    [publish]
-  );
-
-  const connectRoom = useCallback(
-    async (code: string, asRole: "host" | "guest") => {
-      const normalized = code.toUpperCase();
-
-      if (
-        clientRef.current?.connected &&
-        codeRef.current === normalized &&
-        roleRef.current === asRole
-      ) {
-        setPhase("playing");
+  const startHttpGuest = useCallback(
+    async (codeRaw: string) => {
+      const code = codeRaw.trim().toUpperCase();
+      if (code.length < 4) {
+        setError("Enter a valid room code.");
         return;
       }
-
       cleanup();
-      intentionalClose.current = false;
-
-      codeRef.current = normalized;
-      roleRef.current = asRole;
-      setRole(asRole);
-      setYourColor(asRole === "host" ? "w" : "b");
-      setRoomCode(normalized);
+      setMode("http");
       setPhase("connecting");
+      setStatusLine("Joining room…");
       setError("");
-      setStatusLine("Connecting…");
-      setConnected(false);
       setBanner(null);
       setViewIndex(-1);
+      lastUpdatedRef.current = 0;
+      prevHistoryLen.current = 0;
+      roleRef.current = "guest";
+
+      const pid = playerIdRef.current || makePlayerId();
+      try {
+        // Retry join a few times (serverless instance lag)
+        let data: PublicRoom | null = null;
+        let lastErr = "Room not found";
+        for (let i = 0; i < 6; i++) {
+          const res = await fetch(`/api/rooms/${code}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "join", playerId: pid }),
+          });
+          if (res.ok) {
+            data = (await res.json()) as PublicRoom;
+            break;
+          }
+          const err = await res.json().catch(() => ({}));
+          lastErr = err.error || lastErr;
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        if (!data) throw new Error(lastErr);
+
+        applyHttpRoom(data);
+        bootstrapped.current = true;
+        router.replace("/play/online?room=" + data.code);
+        stopPoll();
+        pollRef.current = setInterval(async () => {
+          try {
+            const r = await fetch(
+              `/api/rooms/${data!.code}?playerId=${encodeURIComponent(pid)}`,
+              { cache: "no-store" }
+            );
+            if (r.ok) applyHttpRoom((await r.json()) as PublicRoom);
+          } catch {
+            /* */
+          }
+        }, 800);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not join room.");
+        setPhase("lobby");
+      }
+    },
+    [applyHttpRoom, cleanup, router, stopPoll]
+  );
+
+  // —— MQTT mode (optional realtime) ——
+  const startMqtt = useCallback(
+    async (code: string, asRole: "host" | "guest") => {
+      const normalized = code.toUpperCase();
+      cleanup();
+      setMode("mqtt");
+      setPhase("connecting");
+      setStatusLine("Connecting…");
+      setError("");
+      roleRef.current = asRole;
+      setYourColor(asRole === "host" ? "w" : "b");
+      setRoomCode(normalized);
+      setConnected(false);
       setGame(
         emptyGame(
           asRole === "host"
@@ -280,68 +276,111 @@ function OnlinePlayInner() {
         )
       );
       prevHistoryLen.current = 0;
-
       bootstrapped.current = true;
       router.replace("/play/online?room=" + normalized);
 
-      let connectFn: ConnectFn;
-      try {
-        connectFn = await loadMqttConnect();
-      } catch {
-        setError("Failed to load multiplayer module. Refresh and try again.");
-        setPhase("lobby");
-        return;
-      }
+      const myId = playerIdRef.current || makePlayerId();
 
-      for (let i = 0; i < MQTT_URLS.length; i++) {
-        const url = MQTT_URLS[i];
-        setStatusLine(
-          i === 0 ? "Connecting…" : "Trying backup server (" + (i + 1) + ")…"
+      for (const url of MQTT_URLS) {
+        const client = new MiniMqtt(
+          url,
+          "pp" + asRole[0] + Math.random().toString(16).slice(2, 8)
         );
-
         try {
-          const client = connectFn(url, {
-            clientId: "pp" + asRole[0] + Math.random().toString(16).slice(2, 10),
-            clean: true,
-            connectTimeout: 8000,
-            reconnectPeriod: 3000,
-            keepalive: 30,
-            protocolVersion: 4,
-          });
+          setStatusLine("Connecting…");
+          await client.connect(7000);
+          mqttRef.current = client;
+          client.subscribe(topicFor(normalized));
+          client.on((_topic, payload) => {
+            let msg: RoomMessage;
+            try {
+              msg = JSON.parse(payload) as RoomMessage;
+            } catch {
+              return;
+            }
+            if (!msg || typeof msg !== "object") return;
 
-          const ok = await new Promise<boolean>((resolve) => {
-            const t = setTimeout(() => {
-              try {
-                client.end(true);
-              } catch {
-                /* */
+            if (msg.type === "ping") {
+              if (msg.from !== myId) {
+                client.publish(
+                  topicFor(normalized),
+                  JSON.stringify({ type: "pong", from: myId })
+                );
               }
-              resolve(false);
-            }, 9000);
-
-            client.once("connect", () => {
-              clearTimeout(t);
-              resolve(true);
-            });
+              return;
+            }
+            if (msg.type === "pong" && msg.from !== myId) {
+              setConnected(true);
+              return;
+            }
+            if (msg.type === "hello" && msg.playerId !== myId) {
+              setConnected(true);
+              if (roleRef.current === "host") {
+                const payloadGame: GameState = {
+                  ...gameRef.current,
+                  status:
+                    gameRef.current.history.length === 0
+                      ? "Both connected. White to move."
+                      : gameRef.current.status,
+                };
+                setGame(payloadGame);
+                client.publish(
+                  topicFor(normalized),
+                  JSON.stringify({
+                    type: "sync",
+                    game: payloadGame,
+                    from: myId,
+                  })
+                );
+              }
+              return;
+            }
+            if (
+              (msg.type === "sync" ||
+                msg.type === "move" ||
+                msg.type === "reset") &&
+              msg.from !== myId
+            ) {
+              setConnected(true);
+              setGame(msg.game);
+              setViewIndex(-1);
+              if (msg.type === "reset") setBanner(null);
+            }
           });
 
-          if (!ok) continue;
+          client.publish(
+            topicFor(normalized),
+            JSON.stringify({
+              type: "hello",
+              role: asRole,
+              playerId: myId,
+            } satisfies RoomMessage)
+          );
 
-          wireClient(client, normalized, asRole);
+          setPhase("playing");
+          setStatusLine("");
+          if (asRole === "host") {
+            setGame(emptyGame("Share the code. Waiting for opponent…"));
+          }
           return;
         } catch {
-          /* try next broker */
+          try {
+            client.end();
+          } catch {
+            /* */
+          }
         }
       }
 
-      setError("Could not connect. Check your network and try again.");
-      setPhase("lobby");
-      roleRef.current = null;
-      codeRef.current = "";
+      // MQTT failed — fall back to HTTP
+      setStatusLine("Using server relay…");
+      if (asRole === "host") await startHttpHost();
+      else await startHttpGuest(normalized);
     },
-    [cleanup, router, wireClient]
+    [cleanup, router, startHttpGuest, startHttpHost]
   );
 
+  // URL bootstrap
   useEffect(() => {
     if (!roomFromUrl || bootstrapped.current) return;
     bootstrapped.current = true;
@@ -352,38 +391,25 @@ function OnlinePlayInner() {
     } catch {
       /* */
     }
-    void connectRoom(code, isHost ? "host" : "guest");
+    // Prefer HTTP for reliability
+    if (isHost) void startHttpHost();
+    else void startHttpGuest(code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomFromUrl]);
 
   function startHost() {
-    const code = generateRoomCode();
-    try {
-      sessionStorage.setItem(hostKey(code), "1");
-    } catch {
-      /* */
-    }
-    bootstrapped.current = true;
-    void connectRoom(code, "host");
+    // HTTP first so Create Room never fails
+    void startHttpHost();
   }
 
   function startGuest(code: string) {
-    const normalized = code.trim().toUpperCase();
-    if (normalized.length < 4) {
-      setError("Enter a valid room code.");
-      return;
-    }
-    try {
-      sessionStorage.removeItem(hostKey(normalized));
-    } catch {
-      /* */
-    }
-    bootstrapped.current = true;
-    void connectRoom(normalized, "guest");
+    void startHttpGuest(code);
   }
 
-  function handleMove(move: Move, newFen: string) {
-    if (!yourColor || game.gameOver || !connected) return;
+  async function handleMove(move: Move, newFen: string) {
+    if (!yourColor || game.gameOver) return;
+    if (mode === "mqtt" && !connected) return;
+    if (mode === "http" && !connected) return;
 
     let chess: Chess;
     try {
@@ -391,7 +417,6 @@ function OnlinePlayInner() {
     } catch {
       return;
     }
-
     const mover = chess.turn() === "w" ? "b" : "w";
     if (mover !== yourColor) return;
 
@@ -422,17 +447,37 @@ function OnlinePlayInner() {
     };
     setGame(next);
     setViewIndex(-1);
-    publish(
-      {
-        type: "move",
-        game: next,
-        from: playerIdRef.current || makePlayerId(),
-      },
-      roomCode
-    );
+
+    const pid = playerIdRef.current || makePlayerId();
+
+    if (mode === "mqtt" && mqttRef.current?.connected) {
+      mqttRef.current.publish(
+        topicFor(roomCode),
+        JSON.stringify({ type: "move", game: next, from: pid })
+      );
+      return;
+    }
+
+    // HTTP
+    try {
+      const res = await fetch(`/api/rooms/${roomCode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "move",
+          playerId: pid,
+          from: move.from,
+          to: move.to,
+          promotion: move.promotion || "q",
+        }),
+      });
+      if (res.ok) applyHttpRoom((await res.json()) as PublicRoom);
+    } catch {
+      /* poll recovers */
+    }
   }
 
-  function newGame() {
+  async function newGame() {
     const next = emptyGame(
       connected ? "New game. White to move." : "Waiting for opponent…"
     );
@@ -440,14 +485,26 @@ function OnlinePlayInner() {
     setViewIndex(-1);
     setBanner(null);
     prevHistoryLen.current = 0;
-    publish(
-      {
-        type: "reset",
-        game: next,
-        from: playerIdRef.current || makePlayerId(),
-      },
-      roomCode
-    );
+    const pid = playerIdRef.current || makePlayerId();
+
+    if (mode === "mqtt" && mqttRef.current?.connected) {
+      mqttRef.current.publish(
+        topicFor(roomCode),
+        JSON.stringify({ type: "reset", game: next, from: pid })
+      );
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/rooms/${roomCode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset", playerId: pid }),
+      });
+      if (res.ok) applyHttpRoom((await res.json()) as PublicRoom);
+    } catch {
+      /* */
+    }
   }
 
   function copyCode() {
@@ -467,10 +524,8 @@ function OnlinePlayInner() {
   function leave() {
     cleanup();
     roleRef.current = null;
-    codeRef.current = "";
     bootstrapped.current = false;
     setPhase("lobby");
-    setRole(null);
     setYourColor(null);
     setRoomCode("");
     setGame(emptyGame());
@@ -478,6 +533,7 @@ function OnlinePlayInner() {
     setStatusLine("");
     setBanner(null);
     setViewIndex(-1);
+    setConnected(false);
     router.replace("/play/online");
   }
 
@@ -529,9 +585,7 @@ function OnlinePlayInner() {
                 fontSize: "1rem",
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && joinInput.trim().length >= 4) {
-                  startGuest(joinInput);
-                }
+                if (e.key === "Enter" && joinInput.trim().length >= 4) startGuest(joinInput);
               }}
             />
             <button
@@ -596,7 +650,7 @@ function OnlinePlayInner() {
               title={banner.title}
               subtitle={banner.subtitle}
               actionLabel="New game"
-              onAction={newGame}
+              onAction={() => void newGame()}
               onDismiss={() => setBanner(null)}
             />
           )}
@@ -607,11 +661,7 @@ function OnlinePlayInner() {
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", color: connected ? "var(--accent)" : "var(--muted)", marginBottom: "0.55rem" }}>
               {connected ? <Wifi style={{ width: 14, height: 14 }} /> : <WifiOff style={{ width: 14, height: 14 }} />}
-              {connected
-                ? "Opponent connected"
-                : mqttReady
-                  ? "Waiting for opponent…"
-                  : statusLine || "Connecting…"}
+              {connected ? "Opponent connected" : "Waiting for opponent…"}
             </div>
             <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.65rem" }}>
               {viewingPast ? "Viewing past move" : game.status}
@@ -638,7 +688,7 @@ function OnlinePlayInner() {
                 <Link2 className="w-4 h-4" /> Link
               </button>
             </div>
-            <button onClick={newGame} className="btn-ghost" style={{ width: "100%" }} disabled={!connected}>
+            <button onClick={() => void newGame()} className="btn-ghost" style={{ width: "100%" }} disabled={!connected}>
               <RotateCcw className="w-4 h-4" /> New Game
             </button>
             <button onClick={leave} className="btn-ghost" style={{ width: "100%", marginTop: "0.15rem" }}>
