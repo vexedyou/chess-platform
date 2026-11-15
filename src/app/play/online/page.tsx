@@ -14,7 +14,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import type { DataConnection, Peer } from "peerjs";
 import {
   clearHost, emptyGame, generateRoomCode, markHost, PEER_OPTIONS,
-  roomPeerId, wasHost, type GamePayload, type P2PMessage,
+  wasHost, type GamePayload, type P2PMessage,
 } from "@/lib/p2p";
 
 type Phase = "lobby" | "connecting" | "playing";
@@ -23,9 +23,11 @@ function OnlinePlayInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const roomFromUrl = searchParams.get("room");
+  const hostIdFromUrl = searchParams.get("h");
 
   const [phase, setPhase] = useState<Phase>("lobby");
   const [roomCode, setRoomCode] = useState(roomFromUrl?.toUpperCase() || "");
+  const [hostPeerId, setHostPeerId] = useState(hostIdFromUrl || "");
   const [joinInput, setJoinInput] = useState("");
   const [role, setRole] = useState<"host" | "guest" | null>(null);
   const [yourColor, setYourColor] = useState<"w" | "b" | null>(null);
@@ -44,10 +46,13 @@ function OnlinePlayInner() {
   const connectingRef = useRef(false);
   const prevHistoryLen = useRef(0);
   const guestRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bootstrappedUrl = useRef(false);
+  const hostPeerIdRef = useRef(hostIdFromUrl || "");
   const boardWidth = useBoardWidth(720);
 
   useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => { hostPeerIdRef.current = hostPeerId; }, [hostPeerId]);
 
   useEffect(() => {
     const len = game.history.length;
@@ -80,7 +85,25 @@ function OnlinePlayInner() {
     }
   }, [game.fen, game.gameOver, game.history, game.status, yourColor]);
 
+  const stopPing = useCallback(() => {
+    if (pingRef.current) {
+      clearInterval(pingRef.current);
+      pingRef.current = null;
+    }
+  }, []);
+
+  const startPing = useCallback(() => {
+    stopPing();
+    pingRef.current = setInterval(() => {
+      const conn = connRef.current;
+      if (conn?.open) {
+        try { conn.send({ type: "ping" } satisfies P2PMessage); } catch { /* */ }
+      }
+    }, 3000);
+  }, [stopPing]);
+
   const cleanup = useCallback((keepHostMark = false) => {
+    stopPing();
     if (guestRetryRef.current) {
       clearTimeout(guestRetryRef.current);
       guestRetryRef.current = null;
@@ -91,7 +114,7 @@ function OnlinePlayInner() {
     peerRef.current = null;
     connectingRef.current = false;
     if (!keepHostMark && roomCode) clearHost(roomCode);
-  }, [roomCode]);
+  }, [roomCode, stopPing]);
 
   useEffect(() => () => cleanup(), [cleanup]);
 
@@ -113,6 +136,8 @@ function OnlinePlayInner() {
     setError("");
     setStatusLine("");
     connectingRef.current = false;
+    startPing();
+
     if (asRole === "host") {
       const payload: GamePayload = {
         ...gameRef.current,
@@ -126,7 +151,7 @@ function OnlinePlayInner() {
     } else {
       try { conn.send({ type: "hello", role: "guest" } satisfies P2PMessage); } catch { /* */ }
     }
-  }, []);
+  }, [startPing]);
 
   const wireConnection = useCallback((conn: DataConnection, asRole: "host" | "guest") => {
     if (connRef.current && connRef.current !== conn) {
@@ -137,6 +162,13 @@ function OnlinePlayInner() {
     conn.on("data", (raw) => {
       const msg = raw as P2PMessage;
       if (!msg || typeof msg !== "object") return;
+
+      if (msg.type === "ping") {
+        try { conn.send({ type: "pong" } satisfies P2PMessage); } catch { /* */ }
+        return;
+      }
+      if (msg.type === "pong") return;
+
       if (msg.type === "hello" && asRole === "host") {
         const payload: GamePayload = {
           ...gameRef.current,
@@ -150,6 +182,7 @@ function OnlinePlayInner() {
         try { conn.send({ type: "sync", game: payload } satisfies P2PMessage); } catch { /* */ }
         return;
       }
+
       if (msg.type === "sync" || msg.type === "move" || msg.type === "reset") {
         applyRemoteGame(msg.game);
         setConnected(true);
@@ -161,21 +194,22 @@ function OnlinePlayInner() {
     conn.on("close", () => {
       if (connRef.current === conn) {
         setConnected(false);
+        stopPing();
         setGame((g) => ({
           ...g,
-          status: "Opponent disconnected. They can rejoin with the same link.",
+          status: "Connection lost. Guest can rejoin with the same link.",
         }));
+        // Host keeps listening for a new connection; guest can hit Retry
       }
     });
 
     conn.on("error", () => {
-      setError("Connection hiccup. If moves stop, leave and rejoin the room.");
+      setError("Connection issue. Try Retry connect or share a fresh link.");
     });
 
-    // PeerJS may fire open before listeners attach
     if (conn.open) onConnOpen(conn, asRole);
     else conn.on("open", () => onConnOpen(conn, asRole));
-  }, [applyRemoteGame, onConnOpen]);
+  }, [applyRemoteGame, onConnOpen, stopPing]);
 
   const startHost = useCallback(async (code: string) => {
     const normalized = code.toUpperCase();
@@ -193,17 +227,21 @@ function OnlinePlayInner() {
     setConnected(false);
     setBanner(null);
     setViewIndex(-1);
-    setGame(emptyGame("Share the code or link. Waiting for opponent…"));
+    setGame(emptyGame("Share the link. Waiting for opponent…"));
 
     const { default: Peer } = await import("peerjs");
-    const peer = new Peer(roomPeerId(normalized), PEER_OPTIONS);
+    // Random ID is far more reliable than custom room-based IDs on the public broker
+    const peer = new Peer(PEER_OPTIONS);
     peerRef.current = peer;
 
-    peer.on("open", () => {
+    peer.on("open", (id) => {
+      setHostPeerId(id);
+      hostPeerIdRef.current = id;
+      markHost(normalized, id);
       setPhase("playing");
       setStatusLine("");
-      setGame(emptyGame("Share the code or link. Waiting for opponent…"));
-      router.replace("/play/online?room=" + normalized);
+      setGame(emptyGame("Share the link. Waiting for opponent…"));
+      router.replace("/play/online?room=" + normalized + "&h=" + encodeURIComponent(id));
     });
 
     peer.on("connection", (conn) => {
@@ -216,25 +254,32 @@ function OnlinePlayInner() {
     });
 
     peer.on("disconnected", () => {
+      setStatusLine("Reconnecting to network…");
       try { peer.reconnect(); } catch { /* */ }
     });
 
     peer.on("error", (err) => {
       const message = String((err as { type?: string })?.type || (err as Error)?.message || err);
-      if (message.includes("unavailable-id") || message.includes("taken") || message.includes("Error: ID")) {
-        setStatusLine("Room id busy, trying another…");
-        void startHost(generateRoomCode());
-        return;
+      if (message.includes("network") || message.includes("disconnected") || message.includes("socket")) {
+        setError("Network glitch. Click Create Room again.");
+      } else {
+        setError("Could not create room. Check connection and try again.");
       }
-      setError("Could not create room. Check connection and try again.");
       setPhase("lobby");
       roleRef.current = null;
       connectingRef.current = false;
     });
   }, [cleanup, router, wireConnection]);
 
-  const startGuest = useCallback(async (code: string) => {
+  const startGuest = useCallback(async (code: string, hostId: string) => {
     const normalized = code.toUpperCase();
+    const targetHost = hostId.trim();
+    if (!targetHost) {
+      setError("This link is missing the host id. Ask for a fresh share link.");
+      setPhase("lobby");
+      return;
+    }
+
     cleanup(false);
     connectingRef.current = true;
     roleRef.current = "guest";
@@ -245,6 +290,7 @@ function OnlinePlayInner() {
     setRole("guest");
     setYourColor("b");
     setRoomCode(normalized);
+    setHostPeerId(targetHost);
     setConnected(false);
     setBanner(null);
     setViewIndex(-1);
@@ -261,45 +307,62 @@ function OnlinePlayInner() {
       setStatusLine(
         attempt <= 1
           ? "Connecting to host…"
-          : "Retrying connection (" + attempt + "/5)…"
+          : "Retrying connection (" + attempt + "/10)…"
       );
 
       try {
-        const conn = peer.connect(roomPeerId(normalized), {
+        // Close previous half-open conn before retry
+        if (connRef.current) {
+          try { connRef.current.close(); } catch { /* */ }
+          connRef.current = null;
+        }
+        const conn = peer.connect(targetHost, {
           reliable: true,
           serialization: "json",
         });
         wireConnection(conn, "guest");
       } catch { /* retry */ }
 
-      if (attempt < 5) {
+      if (attempt < 10) {
         guestRetryRef.current = setTimeout(() => {
           if (!connRef.current?.open) tryConnect(attempt + 1);
-        }, 2500);
+        }, 2000);
       } else {
         guestRetryRef.current = setTimeout(() => {
           if (!connRef.current?.open) {
-            setError("Could not reach the host. Make sure they still have the room open, then retry.");
+            setError("Could not reach the host. They may need to create a new room and resend the link.");
             setStatusLine("");
             setPhase("lobby");
             roleRef.current = null;
             connectingRef.current = false;
             cleanup(false);
           }
-        }, 2500);
+        }, 2000);
       }
     };
 
     peer.on("open", () => tryConnect(1));
-    peer.on("error", () => {
+
+    peer.on("disconnected", () => {
+      try { peer.reconnect(); } catch { /* */ }
+    });
+
+    peer.on("error", (err) => {
       if (connRef.current?.open) return;
-      setError("Could not join. Check the code and that the host is online.");
+      const message = String((err as { type?: string })?.type || (err as Error)?.message || err);
+      if (message.includes("peer-unavailable")) {
+        setError("Host is not online. Ask them to keep the room open and send a fresh link.");
+      } else {
+        setError("Could not join. Check the link and that the host is online.");
+      }
       setPhase("lobby");
       roleRef.current = null;
       connectingRef.current = false;
     });
 
-    router.replace("/play/online?room=" + normalized);
+    router.replace(
+      "/play/online?room=" + normalized + "&h=" + encodeURIComponent(targetHost)
+    );
   }, [cleanup, router, wireConnection]);
 
   useEffect(() => {
@@ -308,10 +371,29 @@ function OnlinePlayInner() {
     if (phase !== "lobby") return;
     bootstrappedUrl.current = true;
     const code = roomFromUrl.toUpperCase();
-    if (wasHost(code)) void startHost(code);
-    else void startGuest(code);
+
+    if (wasHost(code) && !hostIdFromUrl) {
+      // Old host tab refreshed without peer id — start fresh host session
+      void startHost(code);
+      return;
+    }
+
+    if (hostIdFromUrl && !wasHost(code)) {
+      void startGuest(code, hostIdFromUrl);
+      return;
+    }
+
+    if (wasHost(code)) {
+      void startHost(code);
+      return;
+    }
+
+    // Room code only, no host id — cannot join reliably
+    if (!hostIdFromUrl) {
+      setError("This link is incomplete. Ask the host to share the full link (Copy Link).");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomFromUrl]);
+  }, [roomFromUrl, hostIdFromUrl]);
 
   function handleMove(move: Move, newFen: string) {
     if (!yourColor || game.gameOver || !connected) return;
@@ -350,6 +432,12 @@ function OnlinePlayInner() {
     send({ type: "reset", game: next });
   }
 
+  function shareUrl() {
+    const h = hostPeerId || hostPeerIdRef.current;
+    if (!roomCode || !h) return window.location.href;
+    return window.location.origin + "/play/online?room=" + roomCode + "&h=" + encodeURIComponent(h);
+  }
+
   function copyCode() {
     navigator.clipboard.writeText(roomCode);
     setCopied(true);
@@ -357,7 +445,7 @@ function OnlinePlayInner() {
   }
 
   function copyLink() {
-    navigator.clipboard.writeText(window.location.origin + "/play/online?room=" + roomCode);
+    navigator.clipboard.writeText(shareUrl());
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
@@ -369,8 +457,9 @@ function OnlinePlayInner() {
     setPhase("lobby");
     setRole(null);
     setYourColor(null);
-    setConnected(false);
+    setConnectedConnected(false);
     setRoomCode("");
+    setHostPeerId("");
     setGame(emptyGame());
     setError("");
     setStatusLine("");
@@ -388,32 +477,47 @@ function OnlinePlayInner() {
           </div>
           <h1 style={{ fontSize: "1.5rem", fontWeight: 700, margin: "0 0 0.5rem" }}>Play Online</h1>
           <p style={{ color: "var(--muted)", fontSize: "0.875rem", marginBottom: "1.75rem", lineHeight: 1.5 }}>
-            Create a room and share the link. Keep the host tab open while the guest joins.
+            Create a room, then share the <strong>full link</strong> (not just the code). Keep the host tab open.
           </p>
           {error && <p style={{ color: "#f87171", fontSize: "0.875rem", marginBottom: "1rem" }}>{error}</p>}
           <button onClick={() => void startHost(generateRoomCode())} className="btn-primary" style={{ width: "100%", marginBottom: "1.5rem" }}>
             Create Room
           </button>
-          <div style={{ position: "relative", marginBottom: "1.25rem" }}>
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center" }}>
-              <div style={{ width: "100%", borderTop: "1px solid var(--border)" }} />
+          <p style={{ color: "var(--muted)", fontSize: "0.75rem", margin: 0, lineHeight: 1.45 }}>
+            Guests should open the shared link. Joining by code alone is no longer supported (it was a common cause of timeouts).
+          </p>
+          {joinInput && (
+            <div style={{ marginTop: "1rem" }}>
+              <input
+                type="text" value={joinInput}
+                onChange={(e) => setJoinInput(e.target.value)}
+                placeholder="Paste full invite link"
+                style={{ width: "100%", background: "var(--background)", border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.625rem 1rem", color: "var(--foreground)", fontSize: "0.85rem" }}
+              />
+              <button
+                className="btn-secondary"
+                style={{ width: "100%", marginTop: "0.5rem" }}
+                onClick={() => {
+                  try {
+                    const u = new URL(joinInput.trim());
+                    const room = u.searchParams.get("room");
+                    const h = u.searchParams.get("h");
+                    if (room && h) void startGuest(room, h);
+                    else setError("Link must include room and host id. Use Copy Link from the host.");
+                  } catch {
+                    setError("Invalid link.");
+                  }
+                }}
+              >
+                Join from link
+              </button>
             </div>
-            <div style={{ position: "relative", display: "flex", justifyContent: "center" }}>
-              <span style={{ background: "var(--card)", padding: "0 0.75rem", fontSize: "0.75rem", color: "var(--muted)" }}>or join</span>
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <input
-              type="text" value={joinInput}
-              onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
-              placeholder="ROOM CODE" maxLength={6}
-              style={{ flex: 1, background: "var(--background)", border: "1px solid var(--border)", borderRadius: "0.5rem", padding: "0.625rem 1rem", textAlign: "center", fontFamily: "monospace", letterSpacing: "0.15em", color: "var(--foreground)", fontSize: "1rem" }}
-              onKeyDown={(e) => { if (e.key === "Enter" && joinInput.trim().length >= 4) void startGuest(joinInput.trim().toUpperCase()); }}
-            />
-            <button onClick={() => void startGuest(joinInput.trim().toUpperCase())} className="btn-secondary" disabled={joinInput.trim().length < 4}>
-              Join
+          )}
+          {!joinInput && (
+            <button className="btn-ghost" style={{ marginTop: "1rem" }} onClick={() => setJoinInput(" ")}>
+              Paste invite link instead
             </button>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -478,8 +582,8 @@ function OnlinePlayInner() {
               )}
             </div>
             {error && <p style={{ color: "#f87171", fontSize: "0.8rem", marginBottom: "0.65rem" }}>{error}</p>}
-            {!connected && role === "guest" && (
-              <button onClick={() => void startGuest(roomCode)} className="btn-secondary" style={{ width: "100%", marginBottom: "0.5rem" }}>
+            {!connected && role === "guest" && hostPeerId && (
+              <button onClick={() => void startGuest(roomCode, hostPeerId)} className="btn-secondary" style={{ width: "100%", marginBottom: "0.5rem" }}>
                 <RefreshCw className="w-4 h-4" /> Retry connect
               </button>
             )}
@@ -491,6 +595,9 @@ function OnlinePlayInner() {
                 <Link2 className="w-4 h-4" /> Link
               </button>
             </div>
+            <p style={{ fontSize: "0.7rem", color: "var(--muted)", margin: "0 0 0.5rem" }}>
+              Share the <strong>Link</strong> button (includes host id). Code alone will not connect.
+            </p>
             <button onClick={newGame} className="btn-ghost" style={{ width: "100%" }} disabled={!connected}>
               <RotateCcw className="w-4 h-4" /> New Game
             </button>
