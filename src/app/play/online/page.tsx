@@ -24,20 +24,21 @@ import {
 } from "@/lib/mqtt-room";
 
 type Phase = "lobby" | "connecting" | "playing";
+type ConnectFn = (url: string, opts?: Record<string, unknown>) => MqttClient;
 
-async function loadMqttConnect() {
-  // Prefer the prebuilt browser bundle — avoids Node polyfill issues in Next/Turbopack
+async function loadMqttConnect(): Promise<ConnectFn> {
   try {
     const mod = await import("mqtt/dist/mqtt.min");
-    const connect = (mod as { connect?: typeof import("mqtt").connect }).connect
-      || (mod as { default?: { connect: typeof import("mqtt").connect } }).default?.connect
-      || (mod as unknown as typeof import("mqtt").connect);
-    if (typeof connect === "function") return connect;
+    const c =
+      (mod as { connect?: ConnectFn }).connect ||
+      (mod as { default?: { connect?: ConnectFn } }).default?.connect ||
+      (mod as unknown as ConnectFn);
+    if (typeof c === "function") return c;
   } catch {
     /* fall through */
   }
   const mod = await import("mqtt");
-  return mod.connect;
+  return mod.connect as unknown as ConnectFn;
 }
 
 function OnlinePlayInner() {
@@ -248,7 +249,6 @@ function OnlinePlayInner() {
     async (code: string, asRole: "host" | "guest") => {
       const normalized = code.toUpperCase();
 
-      // Already connected to this room as this role — don't tear down
       if (
         clientRef.current?.connected &&
         codeRef.current === normalized &&
@@ -281,11 +281,10 @@ function OnlinePlayInner() {
       );
       prevHistoryLen.current = 0;
 
-      // Update URL without retriggering a second connect
       bootstrapped.current = true;
       router.replace("/play/online?room=" + normalized);
 
-      let connectFn: typeof import("mqtt").connect;
+      let connectFn: ConnectFn;
       try {
         connectFn = await loadMqttConnect();
       } catch {
@@ -294,7 +293,6 @@ function OnlinePlayInner() {
         return;
       }
 
-      let lastError: unknown = null;
       for (let i = 0; i < MQTT_URLS.length; i++) {
         const url = MQTT_URLS[i];
         setStatusLine(
@@ -303,10 +301,7 @@ function OnlinePlayInner() {
 
         try {
           const client = connectFn(url, {
-            clientId:
-              "pp" +
-              asRole[0] +
-              Math.random().toString(16).slice(2, 10),
+            clientId: "pp" + asRole[0] + Math.random().toString(16).slice(2, 10),
             clean: true,
             connectTimeout: 8000,
             reconnectPeriod: 3000,
@@ -328,24 +323,17 @@ function OnlinePlayInner() {
               clearTimeout(t);
               resolve(true);
             });
-            client.once("error", () => {
-              /* wait for timeout or connect */
-            });
           });
 
-          if (!ok) {
-            lastError = new Error("timeout " + url);
-            continue;
-          }
+          if (!ok) continue;
 
           wireClient(client, normalized, asRole);
           return;
-        } catch (e) {
-          lastError = e;
+        } catch {
+          /* try next broker */
         }
       }
 
-      console.error("MQTT connect failed", lastError);
       setError("Could not connect. Check your network and try again.");
       setPhase("lobby");
       roleRef.current = null;
@@ -354,7 +342,6 @@ function OnlinePlayInner() {
     [cleanup, router, wireClient]
   );
 
-  // Join from URL only once (guest or returning host tab)
   useEffect(() => {
     if (!roomFromUrl || bootstrapped.current) return;
     bootstrapped.current = true;
