@@ -32,10 +32,9 @@ body {
   min-height: 100vh;
 }
 
-/* Layout helpers that must work even if some utilities fail */
 .page-wrap {
   width: 100%;
-  max-width: 72rem;
+  max-width: 90rem;
   margin-left: auto;
   margin-right: auto;
   padding-left: 1rem;
@@ -158,12 +157,12 @@ body {
 }
 
 .board-container {
-  max-width: min(92vw, 540px);
+  max-width: min(96vw, 720px);
   margin-left: auto;
   margin-right: auto;
+  width: 100%;
 }
 
-/* Buttons */
 .btn-primary {
   display: inline-flex;
   align-items: center;

@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Chess, Move } from "chess.js";
 import ChessBoard from "@/components/ChessBoard";
+import MoveHistory, {
+  fenAfterMoves,
+  lastMoveAt,
+} from "@/components/MoveHistory";
+import GameBanner, { type BannerKind } from "@/components/GameBanner";
 import { getAIMove, Difficulty } from "@/lib/chess-ai";
+import { playGameSound } from "@/lib/sounds";
+import { useBoardWidth } from "@/lib/useBoardWidth";
 import { RotateCcw, Flag, Bot } from "lucide-react";
 
 const START =
@@ -21,28 +28,36 @@ export default function PlayComputerPage() {
   const [gameOver, setGameOver] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
+  const [viewIndex, setViewIndex] = useState(-1);
+  const [banner, setBanner] = useState<{
+    kind: BannerKind;
+    title: string;
+    subtitle?: string;
+  } | null>(null);
+
   const chessRef = useRef(new Chess());
   const thinkingRef = useRef(false);
-  const boardWidth = useBoardWidth();
+  const boardWidth = useBoardWidth(720);
 
-  const describePosition = useCallback(
-    (chess: Chess, forPlayer: boolean) => {
-      if (chess.isCheckmate()) {
-        const winner = chess.turn() === "w" ? "b" : "w";
-        return winner === playerColor
-          ? "You win by checkmate!"
-          : "Computer wins by checkmate";
-      }
-      if (chess.isStalemate()) return "Draw by stalemate";
-      if (chess.isThreefoldRepetition()) return "Draw by repetition";
-      if (chess.isInsufficientMaterial()) return "Draw by insufficient material";
-      if (chess.isDraw()) return "Draw";
-      if (chess.isCheck()) {
-        return forPlayer ? "Check! Your turn" : "Check! Computer thinking...";
-      }
-      return forPlayer ? "Your turn" : "Computer is thinking...";
+  const viewingPast = viewIndex >= 0 && viewIndex < history.length - 1;
+  const displayFen = viewingPast
+    ? fenAfterMoves(history, viewIndex)
+    : fen;
+  const displayLast =
+    viewingPast ? lastMoveAt(history, viewIndex) : lastMove;
+
+  const finishGame = useCallback(
+    (kind: "win" | "lose" | "draw", title: string, subtitle?: string) => {
+      setGameOver(true);
+      setStatus(title);
+      setBanner({ kind, title, subtitle });
+      playGameSound({
+        win: kind === "win",
+        lose: kind === "lose",
+        draw: kind === "draw",
+      });
     },
-    [playerColor]
+    []
   );
 
   const makeAIMove = useCallback(() => {
@@ -59,27 +74,39 @@ export default function PlayComputerPage() {
     setThinking(true);
     setStatus("Computer is thinking...");
 
-    const delay = difficulty === "hard" ? 450 : difficulty === "medium" ? 280 : 150;
+    const delay =
+      difficulty === "hard" ? 400 : difficulty === "medium" ? 250 : 120;
 
     setTimeout(() => {
       const move = getAIMove(chess, difficulty);
       if (move) {
+        const captured = !!chess.get(move.to);
         chess.move(move);
         setFen(chess.fen());
         setLastMove({ from: move.from, to: move.to });
         setHistory((h) => [...h, move.san]);
+        setViewIndex(-1);
 
-        if (chess.isGameOver()) {
-          setGameOver(true);
-          setStatus(describePosition(chess, false));
+        if (chess.isCheckmate()) {
+          finishGame(
+            "lose",
+            "Checkmate",
+            "Computer wins. Better luck next game."
+          );
+        } else if (chess.isDraw()) {
+          finishGame("draw", "Draw", drawReason(chess));
+        } else if (chess.isCheck()) {
+          setStatus("Check! Your turn");
+          playGameSound({ check: true });
         } else {
-          setStatus(describePosition(chess, true));
+          setStatus("Your turn");
+          playGameSound({ capture: captured });
         }
       }
       thinkingRef.current = false;
       setThinking(false);
-    }, delay + Math.random() * 200);
-  }, [difficulty, playerColor, describePosition]);
+    }, delay + Math.random() * 180);
+  }, [difficulty, playerColor, finishGame]);
 
   useEffect(() => {
     const chess = chessRef.current;
@@ -94,25 +121,18 @@ export default function PlayComputerPage() {
     setFen(newFen);
     setLastMove({ from: move.from, to: move.to });
     setHistory((h) => [...h, move.san]);
+    setViewIndex(-1);
 
-    if (chess.isGameOver()) {
-      setGameOver(true);
-      setStatus(describePosition(chess, true));
+    if (chess.isCheckmate()) {
+      finishGame("win", "Checkmate — You win!", "Nice finish.");
+    } else if (chess.isDraw()) {
+      finishGame("draw", "Draw", drawReason(chess));
+    } else if (chess.isCheck()) {
+      setStatus("Check! Computer thinking...");
+      playGameSound({ check: true });
     } else {
-      setStatus(describePosition(chess, false));
-    }
-  }
-
-  function handleGameOver(result: string) {
-    if (gameOver) return;
-    setGameOver(true);
-    if (result === "white" || result === "black") {
-      const won =
-        (result === "white" && playerColor === "w") ||
-        (result === "black" && playerColor === "b");
-      setStatus(won ? "You win by checkmate!" : "Computer wins by checkmate");
-    } else {
-      setStatus(`Draw (${result})`);
+      setStatus("Computer is thinking...");
+      playGameSound({ capture: !!move.captured });
     }
   }
 
@@ -125,58 +145,78 @@ export default function PlayComputerPage() {
     setOrientation(asWhite ? "white" : "black");
     setLastMove(null);
     setHistory([]);
+    setViewIndex(-1);
     setGameOver(false);
     setThinking(false);
+    setBanner(null);
     setStatus(asWhite ? "Your turn" : "Computer is thinking...");
   }
 
   function resign() {
     if (gameOver) return;
-    setGameOver(true);
-    setStatus("You resigned. Computer wins.");
+    finishGame("lose", "You resigned", "Computer wins.");
   }
 
   const canMove =
-    !gameOver && !thinking && chessRef.current.turn() === playerColor;
+    !gameOver &&
+    !thinking &&
+    !viewingPast &&
+    chessRef.current.turn() === playerColor;
 
   return (
-    <div className="page-wrap" style={{ paddingTop: "1.5rem", paddingBottom: "2.5rem" }}>
+    <div
+      className="page-wrap"
+      style={{ paddingTop: "1.25rem", paddingBottom: "2rem" }}
+    >
       <div
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: "1.5rem",
+          gap: "1.25rem",
           alignItems: "center",
         }}
         className="game-layout"
       >
         <style>{`
-          @media (min-width: 1024px) {
-            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; }
-            .game-side { width: 18rem !important; }
+          @media (min-width: 1100px) {
+            .game-layout { flex-direction: row !important; align-items: flex-start !important; justify-content: center; gap: 1.75rem !important; }
+            .game-side { width: 20rem !important; }
           }
         `}</style>
 
         <div className="board-container">
           <ChessBoard
-            fen={fen}
+            fen={displayFen}
             orientation={orientation}
             onMove={handleMove}
-            onGameOver={handleGameOver}
             interactive={canMove}
-            lastMove={lastMove}
+            lastMove={displayLast}
             boardWidth={boardWidth}
           />
         </div>
 
-        <div className="game-side" style={{ width: "100%", maxWidth: 320 }}>
-          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+        <div className="game-side" style={{ width: "100%", maxWidth: 340 }}>
+          {banner && (
+            <GameBanner
+              kind={banner.kind}
+              title={banner.title}
+              subtitle={banner.subtitle}
+              actionLabel="New game"
+              onAction={() => newGame(playerColor === "w")}
+              onDismiss={() => setBanner(null)}
+            />
+          )}
+
+          <div
+            className="card"
+            style={{ padding: "1.2rem", marginBottom: "0.85rem" }}
+          >
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: "0.5rem",
-                marginBottom: "0.75rem",
+                marginBottom: "0.65rem",
               }}
             >
               <Bot style={{ width: 20, height: 20, color: "var(--accent)" }} />
@@ -189,15 +229,15 @@ export default function PlayComputerPage() {
               style={{
                 fontSize: "0.9rem",
                 fontWeight: 500,
-                marginBottom: "1rem",
+                marginBottom: "0.9rem",
                 color: thinking ? "var(--accent)" : undefined,
               }}
               className={thinking ? "animate-pulse-soft" : ""}
             >
-              {status}
+              {viewingPast ? "Viewing past move" : status}
             </p>
 
-            <div style={{ marginBottom: "0.75rem" }}>
+            <div style={{ marginBottom: "0.7rem" }}>
               <div
                 style={{
                   fontSize: "0.7rem",
@@ -209,7 +249,7 @@ export default function PlayComputerPage() {
               >
                 Difficulty
               </div>
-              <div style={{ display: "flex", gap: "0.4rem" }}>
+              <div style={{ display: "flex", gap: "0.35rem" }}>
                 {(["easy", "medium", "hard"] as Difficulty[]).map((d) => (
                   <button
                     key={d}
@@ -219,14 +259,15 @@ export default function PlayComputerPage() {
                     style={{
                       flex: 1,
                       padding: "0.4rem",
-                      fontSize: "0.8rem",
+                      fontSize: "0.78rem",
                       textTransform: "capitalize",
                       background:
                         difficulty === d ? "var(--accent)" : undefined,
                       color: difficulty === d ? "#0a0a0a" : undefined,
-                      borderColor: difficulty === d ? "var(--accent)" : undefined,
+                      borderColor:
+                        difficulty === d ? "var(--accent)" : undefined,
                       fontWeight: difficulty === d ? 600 : undefined,
-                      opacity: !gameOver && history.length > 0 ? 0.6 : 1,
+                      opacity: !gameOver && history.length > 0 ? 0.55 : 1,
                     }}
                   >
                     {d}
@@ -235,7 +276,7 @@ export default function PlayComputerPage() {
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.5rem" }}>
+            <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.4rem" }}>
               <button
                 onClick={() => newGame(true)}
                 className="btn-secondary"
@@ -263,67 +304,20 @@ export default function PlayComputerPage() {
             )}
           </div>
 
-          <MoveList history={history} />
+          <MoveHistory
+            history={history}
+            viewIndex={viewIndex}
+            onViewIndex={setViewIndex}
+          />
         </div>
       </div>
     </div>
   );
 }
 
-function MoveList({ history }: { history: string[] }) {
-  return (
-    <div className="card" style={{ padding: "1.25rem" }}>
-      <h3
-        style={{
-          fontWeight: 500,
-          fontSize: "0.8rem",
-          color: "var(--muted)",
-          margin: "0 0 0.75rem",
-        }}
-      >
-        Moves
-      </h3>
-      {history.length === 0 ? (
-        <p style={{ fontSize: "0.875rem", color: "var(--muted)", margin: 0 }}>
-          No moves yet
-        </p>
-      ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: "0.2rem 0.75rem",
-            fontFamily: "var(--font-geist-mono), monospace",
-            fontSize: "0.85rem",
-            maxHeight: 280,
-            overflowY: "auto",
-          }}
-        >
-          {history.map((san, i) => (
-            <div key={i} style={{ display: "flex", gap: "0.3rem" }}>
-              {i % 2 === 0 && (
-                <span style={{ color: "var(--muted)", minWidth: 20 }}>
-                  {Math.floor(i / 2) + 1}.
-                </span>
-              )}
-              <span>{san}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function useBoardWidth() {
-  const [width, setWidth] = useState(480);
-  useEffect(() => {
-    function update() {
-      setWidth(Math.max(280, Math.min(window.innerWidth - 32, 540)));
-    }
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-  return width;
+function drawReason(chess: Chess) {
+  if (chess.isStalemate()) return "Stalemate";
+  if (chess.isThreefoldRepetition()) return "Threefold repetition";
+  if (chess.isInsufficientMaterial()) return "Insufficient material";
+  return "Agreed by the rules";
 }
