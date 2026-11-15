@@ -1,4 +1,4 @@
-/** MQTT helpers for room-code multiplayer (no server state). */
+/** Shared types for online multiplayer rooms. */
 
 export const START_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -39,15 +39,8 @@ export function generateRoomCode(): string {
 }
 
 export function topicFor(code: string): string {
-  return `pushingpawns/v2/${code.toUpperCase()}`;
+  return `pushingpawns/v3/${code.toUpperCase()}`;
 }
-
-/** Public brokers (WebSocket). Tried in order until one connects. */
-export const MQTT_URLS = [
-  "wss://broker.emqx.io:8084/mqtt",
-  "wss://test.mosquitto.org:8081/mqtt",
-  "wss://broker.hivemq.com:8884/mqtt",
-];
 
 export function makePlayerId(): string {
   try {

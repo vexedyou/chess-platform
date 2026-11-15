@@ -1,4 +1,4 @@
-/** Shared room store for online multiplayer (server-side). */
+/** Server-side room store (HTTP fallback multiplayer). */
 
 export type Room = {
   code: string;
@@ -28,18 +28,14 @@ function store(): Map<string, Room> {
 export function generateCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
-  for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
 }
 
 export function createRoom(hostId: string): Room {
   const rooms = store();
   let code = generateCode();
-  // Avoid collisions
   for (let i = 0; i < 8 && rooms.has(code); i++) code = generateCode();
-
   const room: Room = {
     code,
     fen: START_FEN,
@@ -68,7 +64,6 @@ export function publicRoom(room: Room, playerId: string) {
   let yourColor: "w" | "b" | null = null;
   if (playerId === room.hostId) yourColor = "w";
   else if (playerId === room.guestId) yourColor = "b";
-
   return {
     code: room.code,
     fen: room.fen,

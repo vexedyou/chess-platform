@@ -10,39 +10,29 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const { code } = await ctx.params;
   const playerId = req.nextUrl.searchParams.get("playerId") || "";
   const room = getRoom(code);
-  if (!room) {
-    return NextResponse.json({ error: "Room not found" }, { status: 404 });
-  }
+  if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
   return NextResponse.json(publicRoom(room, playerId));
 }
 
 export async function POST(req: NextRequest, ctx: Ctx) {
   const { code } = await ctx.params;
   const room = getRoom(code);
-  if (!room) {
-    return NextResponse.json({ error: "Room not found" }, { status: 404 });
-  }
+  if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
 
   const body = await req.json().catch(() => ({}));
   const action = String(body.action || "");
   const playerId = String(body.playerId || "").slice(0, 64);
-  if (!playerId) {
-    return NextResponse.json({ error: "playerId required" }, { status: 400 });
-  }
+  if (!playerId) return NextResponse.json({ error: "playerId required" }, { status: 400 });
 
   if (action === "join") {
-    if (playerId === room.hostId) {
-      return NextResponse.json(publicRoom(room, playerId));
-    }
+    if (playerId === room.hostId) return NextResponse.json(publicRoom(room, playerId));
     if (room.guestId && room.guestId !== playerId) {
       return NextResponse.json({ error: "Room is full" }, { status: 403 });
     }
     room.guestId = playerId;
     if (!room.gameOver) {
       room.status =
-        room.history.length === 0
-          ? "Both connected. White to move."
-          : room.status;
+        room.history.length === 0 ? "Both connected. White to move." : room.status;
     }
     saveRoom(room);
     return NextResponse.json(publicRoom(room, playerId));
@@ -52,22 +42,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const from = String(body.from || "");
     const to = String(body.to || "");
     const promotion = body.promotion || "q";
-    if (!from || !to) {
-      return NextResponse.json({ error: "from/to required" }, { status: 400 });
-    }
-
-    // Must be a seated player
     const isHost = playerId === room.hostId;
     const isGuest = playerId === room.guestId;
-    if (!isHost && !isGuest) {
-      return NextResponse.json({ error: "Not in room" }, { status: 403 });
-    }
-    if (room.gameOver) {
-      return NextResponse.json({ error: "Game over" }, { status: 400 });
-    }
-    if (!room.guestId) {
-      return NextResponse.json({ error: "Waiting for opponent" }, { status: 400 });
-    }
+    if (!isHost && !isGuest) return NextResponse.json({ error: "Not in room" }, { status: 403 });
+    if (room.gameOver) return NextResponse.json({ error: "Game over" }, { status: 400 });
+    if (!room.guestId) return NextResponse.json({ error: "Waiting for opponent" }, { status: 400 });
 
     let chess: Chess;
     try {
@@ -87,9 +66,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     } catch {
       move = null;
     }
-    if (!move) {
-      return NextResponse.json({ error: "Illegal move" }, { status: 400 });
-    }
+    if (!move) return NextResponse.json({ error: "Illegal move" }, { status: 400 });
 
     room.fen = chess.fen();
     room.history = [...room.history, move.san];
@@ -125,9 +102,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     room.history = [];
     room.lastMove = null;
     room.gameOver = false;
-    room.status = room.guestId
-      ? "New game. White to move."
-      : "Waiting for opponent…";
+    room.status = room.guestId ? "New game. White to move." : "Waiting for opponent…";
     saveRoom(room);
     return NextResponse.json(publicRoom(room, playerId));
   }
