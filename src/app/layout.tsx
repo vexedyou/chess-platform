@@ -15,9 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChessArena — Play Chess Online",
+  title: "Pushing Pawns — Play Chess Online",
   description:
-    "A modern chess platform. Play vs computer, solve puzzles, analyze games, and challenge friends.",
+    "Play chess vs computer, solve tactics puzzles, analyze games, and challenge friends online.",
 };
 
 export default function RootLayout({
@@ -44,8 +44,8 @@ export default function RootLayout({
         <header
           style={{
             borderBottom: "1px solid var(--border)",
-            background: "rgba(22, 22, 22, 0.9)",
-            backdropFilter: "blur(8px)",
+            background: "rgba(22, 22, 22, 0.92)",
+            backdropFilter: "blur(10px)",
             position: "sticky",
             top: 0,
             zIndex: 50,
@@ -58,6 +58,7 @@ export default function RootLayout({
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
+              gap: "1rem",
             }}
           >
             <Link
@@ -67,39 +68,50 @@ export default function RootLayout({
                 alignItems: "center",
                 gap: "0.5rem",
                 fontWeight: 700,
-                fontSize: "1.125rem",
+                fontSize: "1.05rem",
                 textDecoration: "none",
                 color: "inherit",
+                whiteSpace: "nowrap",
               }}
             >
               <div
                 style={{
-                  width: "2rem",
-                  height: "2rem",
+                  width: "1.85rem",
+                  height: "1.85rem",
                   borderRadius: "0.375rem",
                   background: "var(--accent)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
+                  flexShrink: 0,
                 }}
               >
-                <Crown className="w-5 h-5" style={{ color: "#000" }} />
+                <Crown className="w-4 h-4" style={{ color: "#000" }} />
               </div>
               <span>
-                Chess<span style={{ color: "var(--accent)" }}>Arena</span>
+                Pushing{" "}
+                <span style={{ color: "var(--accent)" }}>Pawns</span>
               </span>
             </Link>
-            <nav style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+            <nav
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.15rem",
+                flexWrap: "wrap",
+                justifyContent: "flex-end",
+              }}
+            >
               <Link href="/play/computer" className="btn-ghost">
-                vs Computer
+                Computer
               </Link>
               <Link href="/play/online" className="btn-ghost">
-                Play Online
+                Online
               </Link>
               <Link href="/puzzles" className="btn-ghost">
                 Puzzles
               </Link>
-              <Link href="/analysis" className="btn-ghost" style={{ display: "none" }}>
+              <Link href="/analysis" className="btn-ghost">
                 Analysis
               </Link>
             </nav>
@@ -109,13 +121,13 @@ export default function RootLayout({
         <footer
           style={{
             borderTop: "1px solid var(--border)",
-            padding: "1.5rem",
+            padding: "1.25rem",
             textAlign: "center",
-            fontSize: "0.875rem",
+            fontSize: "0.8125rem",
             color: "var(--muted)",
           }}
         >
-          <p style={{ margin: 0 }}>ChessArena · Built for players who love the game</p>
+          <p style={{ margin: 0 }}>Pushing Pawns · Chess, focused on the game</p>
         </footer>
       </body>
     </html>

@@ -14,7 +14,6 @@ interface ChessBoardProps {
   lastMove?: { from: string; to: string } | null;
   boardWidth?: number;
   customSquareStyles?: Record<string, React.CSSProperties>;
-  allowPremoves?: boolean;
 }
 
 export default function ChessBoard({
@@ -27,41 +26,49 @@ export default function ChessBoard({
   lastMove = null,
   boardWidth = 480,
   customSquareStyles = {},
-  allowPremoves = false,
 }: ChessBoardProps) {
-  const [game, setGame] = useState(() => new Chess(fen));
+  const [game, setGame] = useState(() => {
+    try {
+      return new Chess(fen);
+    } catch {
+      return new Chess();
+    }
+  });
   const [moveFrom, setMoveFrom] = useState<Square | null>(null);
-  const [optionSquares, setOptionSquares] = useState<Record<string, React.CSSProperties>>({});
-  const [rightClickedSquares, setRightClickedSquares] = useState<Record<string, React.CSSProperties>>({});
+  const [optionSquares, setOptionSquares] = useState<
+    Record<string, React.CSSProperties>
+  >({});
 
   useEffect(() => {
-    if (fen && fen !== game.fen()) {
-      try {
-        const newGame = new Chess(fen);
-        setGame(newGame);
+    if (!fen) return;
+    try {
+      if (fen !== game.fen()) {
+        setGame(new Chess(fen));
         setMoveFrom(null);
         setOptionSquares({});
-      } catch {
-        // invalid fen
       }
+    } catch {
+      // ignore invalid fen
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fen]);
 
   const checkGameOver = useCallback(
     (g: Chess) => {
-      if (g.isGameOver()) {
-        let result = "draw";
-        if (g.isCheckmate()) {
-          result = g.turn() === "w" ? "black" : "white";
-        } else if (g.isStalemate()) {
-          result = "stalemate";
-        } else if (g.isThreefoldRepetition()) {
-          result = "repetition";
-        } else if (g.isInsufficientMaterial()) {
-          result = "insufficient";
-        }
-        onGameOver?.(result);
+      if (!g.isGameOver()) return;
+      let result = "draw";
+      if (g.isCheckmate()) {
+        result = g.turn() === "w" ? "black" : "white";
+      } else if (g.isStalemate()) {
+        result = "stalemate";
+      } else if (g.isThreefoldRepetition()) {
+        result = "repetition";
+      } else if (g.isInsufficientMaterial()) {
+        result = "insufficient";
+      } else if (g.isDraw()) {
+        result = "draw";
       }
+      onGameOver?.(result);
     },
     [onGameOver]
   );
@@ -72,41 +79,58 @@ export default function ChessBoard({
       setOptionSquares({});
       return false;
     }
-
     const newSquares: Record<string, React.CSSProperties> = {};
-    moves.forEach((move) => {
-      newSquares[move.to] = {
+    for (const m of moves) {
+      const target = game.get(m.to as Square);
+      newSquares[m.to] = {
         background:
-          game.get(move.to) && game.get(move.to)?.color !== game.get(square)?.color
-            ? "radial-gradient(circle, rgba(0,0,0,.1) 85%, transparent 85%)"
-            : "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+          target && target.color !== game.get(square)?.color
+            ? "radial-gradient(circle, rgba(0,0,0,.12) 85%, transparent 85%)"
+            : "radial-gradient(circle, rgba(0,0,0,.12) 25%, transparent 25%)",
         borderRadius: "50%",
       };
-    });
-    newSquares[square] = {
-      background: "rgba(255, 255, 0, 0.4)",
-    };
+    }
+    newSquares[square] = { background: "rgba(255, 255, 0, 0.4)" };
     setOptionSquares(newSquares);
     return true;
   }
 
+  function tryMove(from: Square, to: Square): boolean {
+    if (!interactive) return false;
+    try {
+      const copy = new Chess(game.fen());
+      const result = copy.move({ from, to, promotion: "q" });
+      if (!result) return false;
+      setGame(copy);
+      setMoveFrom(null);
+      setOptionSquares({});
+      onMove?.(result, copy.fen());
+      checkGameOver(copy);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function onSquareClick(square: Square) {
     if (!interactive) return;
-    setRightClickedSquares({});
 
     if (!moveFrom) {
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
-        const hasOptions = getMoveOptions(square);
-        if (hasOptions) setMoveFrom(square);
+        if (getMoveOptions(square)) setMoveFrom(square);
       }
       return;
     }
 
-    const moves = game.moves({ square: moveFrom, verbose: true });
-    const foundMove = moves.find((m) => m.from === moveFrom && m.to === square);
+    if (moveFrom === square) {
+      setMoveFrom(null);
+      setOptionSquares({});
+      return;
+    }
 
-    if (!foundMove) {
+    const moved = tryMove(moveFrom, square);
+    if (!moved) {
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
         getMoveOptions(square);
@@ -115,48 +139,33 @@ export default function ChessBoard({
         setMoveFrom(null);
         setOptionSquares({});
       }
-      return;
-    }
-
-    try {
-      const gameCopy = new Chess(game.fen());
-      const result = gameCopy.move({
-        from: moveFrom,
-        to: square,
-        promotion: "q",
-      });
-
-      if (result) {
-        setGame(gameCopy);
-        setMoveFrom(null);
-        setOptionSquares({});
-        onMove?.(result, gameCopy.fen());
-        checkGameOver(gameCopy);
-      }
-    } catch {
-      setMoveFrom(null);
-      setOptionSquares({});
     }
   }
 
-  function onSquareRightClick(square: Square) {
-    const colour = "rgba(0, 0, 255, 0.4)";
-    setRightClickedSquares({
-      ...rightClickedSquares,
-      [square]:
-        rightClickedSquares[square] && rightClickedSquares[square].backgroundColor === colour
-          ? {}
-          : { backgroundColor: colour },
-    });
+  function onPieceDragBegin(_piece: string, sourceSquare: Square) {
+    if (!interactive) return;
+    const piece = game.get(sourceSquare);
+    if (piece && piece.color === game.turn()) {
+      getMoveOptions(sourceSquare);
+      setMoveFrom(sourceSquare);
+    }
+  }
+
+  function onPieceDrop(sourceSquare: Square, targetSquare: Square) {
+    if (!interactive) return false;
+    const ok = tryMove(sourceSquare, targetSquare);
+    if (!ok) {
+      setMoveFrom(null);
+      setOptionSquares({});
+    }
+    return ok;
   }
 
   const styles = useMemo(() => {
     const s: Record<string, React.CSSProperties> = {
       ...optionSquares,
-      ...rightClickedSquares,
       ...customSquareStyles,
     };
-
     if (lastMove) {
       s[lastMove.from] = {
         ...s[lastMove.from],
@@ -167,32 +176,33 @@ export default function ChessBoard({
         backgroundColor: "rgba(155, 199, 0, 0.41)",
       };
     }
-
-    highlightSquares.forEach((sq) => {
-      s[sq] = {
-        ...s[sq],
-        backgroundColor: "rgba(255, 255, 0, 0.5)",
-      };
-    });
-
+    for (const sq of highlightSquares) {
+      s[sq] = { ...s[sq], backgroundColor: "rgba(255, 255, 0, 0.5)" };
+    }
     return s;
-  }, [optionSquares, rightClickedSquares, customSquareStyles, lastMove, highlightSquares]);
+  }, [optionSquares, customSquareStyles, lastMove, highlightSquares]);
 
   return (
-    <div className="rounded-lg overflow-hidden shadow-2xl border border-zinc-700">
+    <div
+      className="rounded-lg overflow-hidden shadow-2xl"
+      style={{ border: "1px solid var(--border)" }}
+    >
       <Chessboard
         position={game.fen()}
         onSquareClick={onSquareClick}
-        onSquareRightClick={onSquareRightClick}
+        onPieceDrop={onPieceDrop}
+        onPieceDragBegin={onPieceDragBegin}
         customSquareStyles={styles}
         boardOrientation={orientation}
         boardWidth={boardWidth}
-        arePiecesDraggable={false}
+        arePiecesDraggable={interactive}
+        isDraggablePiece={({ piece }) =>
+          interactive && piece[0] === game.turn()
+        }
         customDarkSquareStyle={{ backgroundColor: "#779556" }}
         customLightSquareStyle={{ backgroundColor: "#ebecd0" }}
-        customBoardStyle={{
-          borderRadius: "4px",
-        }}
+        customBoardStyle={{ borderRadius: "4px" }}
+        animationDuration={150}
       />
     </div>
   );
