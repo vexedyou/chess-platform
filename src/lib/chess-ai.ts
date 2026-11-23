@@ -1,6 +1,5 @@
 import { Chess, Move, Square } from "chess.js";
 
-// Simple piece values
 const PIECE_VALUES: Record<string, number> = {
   p: 100,
   n: 320,
@@ -10,7 +9,6 @@ const PIECE_VALUES: Record<string, number> = {
   k: 20000,
 };
 
-// Basic piece-square tables (simplified for middlegame)
 const PAWN_TABLE = [
   0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 10, 10, 20, 30, 30, 20, 10, 10, 5, 5, 10, 25, 25, 10, 5, 5, 0, 0, 0, 20, 20, 0, 0, 0, 5, -5, -10, 0, 0, -10, -5, 5, 5, 10, 10, -20, -20, 10, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
@@ -86,7 +84,6 @@ function evaluateBoard(chess: Chess): number {
     }
   }
 
-  // Slight mobility bonus
   const moves = chess.moves().length;
   score += chess.turn() === "w" ? moves * 2 : -moves * 2;
 
@@ -137,7 +134,6 @@ export function getBestMove(chess: Chess, depth: number = 2): Move | null {
   const moves = chess.moves({ verbose: true });
   if (moves.length === 0) return null;
 
-  // Shuffle for variety
   for (let i = moves.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [moves[i], moves[j]] = [moves[j], moves[i]];
@@ -168,13 +164,60 @@ export function getBestMove(chess: Chess, depth: number = 2): Move | null {
   return bestMove;
 }
 
-export type Difficulty = "easy" | "medium" | "hard";
+/** Score all legal moves (for hints / soft play). */
+export function rankMoves(chess: Chess, depth: number = 1): { move: Move; score: number }[] {
+  const moves = chess.moves({ verbose: true });
+  const maximizing = chess.turn() === "w";
+  const ranked: { move: Move; score: number }[] = [];
+
+  for (const move of moves) {
+    chess.move(move);
+    const score =
+      depth <= 0
+        ? evaluateBoard(chess)
+        : minimax(chess, depth - 1, -Infinity, Infinity, !maximizing);
+    chess.undo();
+    ranked.push({ move, score });
+  }
+
+  ranked.sort((a, b) => (maximizing ? b.score - a.score : a.score - b.score));
+  return ranked;
+}
+
+export type Difficulty = "beginner" | "easy" | "medium" | "hard";
 
 export function getAIMove(chess: Chess, difficulty: Difficulty): Move | null {
-  const depths: Record<Difficulty, number> = {
-    easy: 1,
+  if (chess.isGameOver()) return null;
+  const moves = chess.moves({ verbose: true });
+  if (moves.length === 0) return null;
+
+  if (difficulty === "beginner") {
+    // ~55% random legal move, otherwise shallow best
+    if (Math.random() < 0.55) {
+      return moves[Math.floor(Math.random() * moves.length)];
+    }
+    const ranked = rankMoves(chess, 0);
+    // Pick among top half of "good enough" moves
+    const pool = ranked.slice(0, Math.max(1, Math.ceil(ranked.length / 2)));
+    return pool[Math.floor(Math.random() * pool.length)]?.move ?? moves[0];
+  }
+
+  if (difficulty === "easy") {
+    // Sometimes blunder: pick random among weaker moves
+    if (Math.random() < 0.3) {
+      return moves[Math.floor(Math.random() * moves.length)];
+    }
+    return getBestMove(chess, 1);
+  }
+
+  const depths: Record<Exclude<Difficulty, "beginner" | "easy">, number> = {
     medium: 2,
     hard: 3,
   };
   return getBestMove(chess, depths[difficulty]);
+}
+
+/** Best move for hint display. */
+export function getHintMove(chess: Chess): Move | null {
+  return getBestMove(chess, 2);
 }
