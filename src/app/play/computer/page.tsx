@@ -8,10 +8,10 @@ import MoveHistory, {
   lastMoveAt,
 } from "@/components/MoveHistory";
 import GameBanner, { type BannerKind } from "@/components/GameBanner";
-import { getAIMove, Difficulty } from "@/lib/chess-ai";
+import { getAIMove, getHintMove, Difficulty } from "@/lib/chess-ai";
 import { playGameSound } from "@/lib/sounds";
 import { useBoardWidth } from "@/lib/useBoardWidth";
-import { RotateCcw, Flag, Bot } from "lucide-react";
+import { RotateCcw, Flag, Bot, Undo2, Lightbulb, Handshake } from "lucide-react";
 
 const START =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -22,13 +22,12 @@ export default function PlayComputerPage() {
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
   const [playerColor, setPlayerColor] = useState<"w" | "b">("w");
   const [status, setStatus] = useState("Your turn");
-  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(
-    null
-  );
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
   const [gameOver, setGameOver] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const [viewIndex, setViewIndex] = useState(-1);
+  const [hintMove, setHintMove] = useState<{ from: string; to: string } | null>(null);
   const [banner, setBanner] = useState<{
     kind: BannerKind;
     title: string;
@@ -40,17 +39,15 @@ export default function PlayComputerPage() {
   const boardWidth = useBoardWidth(720);
 
   const viewingPast = viewIndex >= 0 && viewIndex < history.length - 1;
-  const displayFen = viewingPast
-    ? fenAfterMoves(history, viewIndex)
-    : fen;
-  const displayLast =
-    viewingPast ? lastMoveAt(history, viewIndex) : lastMove;
+  const displayFen = viewingPast ? fenAfterMoves(history, viewIndex) : fen;
+  const displayLast = viewingPast ? lastMoveAt(history, viewIndex) : lastMove ?? hintMove;
 
   const finishGame = useCallback(
     (kind: "win" | "lose" | "draw", title: string, subtitle?: string) => {
       setGameOver(true);
       setStatus(title);
       setBanner({ kind, title, subtitle });
+      setHintMove(null);
       playGameSound({
         win: kind === "win",
         lose: kind === "lose",
@@ -72,10 +69,17 @@ export default function PlayComputerPage() {
 
     thinkingRef.current = true;
     setThinking(true);
-    setStatus("Computer is thinking...");
+    setStatus("Computer is thinking…");
+    setHintMove(null);
 
     const delay =
-      difficulty === "hard" ? 400 : difficulty === "medium" ? 250 : 120;
+      difficulty === "hard"
+        ? 400
+        : difficulty === "medium"
+          ? 250
+          : difficulty === "easy"
+            ? 150
+            : 80;
 
     setTimeout(() => {
       const move = getAIMove(chess, difficulty);
@@ -122,16 +126,17 @@ export default function PlayComputerPage() {
     setLastMove({ from: move.from, to: move.to });
     setHistory((h) => [...h, move.san]);
     setViewIndex(-1);
+    setHintMove(null);
 
     if (chess.isCheckmate()) {
       finishGame("win", "Checkmate — You win!", "Nice finish.");
     } else if (chess.isDraw()) {
       finishGame("draw", "Draw", drawReason(chess));
     } else if (chess.isCheck()) {
-      setStatus("Check! Computer thinking...");
+      setStatus("Check! Computer thinking…");
       playGameSound({ check: true });
     } else {
-      setStatus("Computer is thinking...");
+      setStatus("Computer is thinking…");
       playGameSound({ capture: !!move.captured });
     }
   }
@@ -149,12 +154,73 @@ export default function PlayComputerPage() {
     setGameOver(false);
     setThinking(false);
     setBanner(null);
-    setStatus(asWhite ? "Your turn" : "Computer is thinking...");
+    setHintMove(null);
+    setStatus(asWhite ? "Your turn" : "Computer is thinking…");
   }
 
   function resign() {
     if (gameOver) return;
     finishGame("lose", "You resigned", "Computer wins.");
+  }
+
+  function offerDraw() {
+    if (gameOver || thinking) return;
+    // Soft AI accepts draws in worse/equal positions roughly
+    const accept =
+      difficulty === "beginner" ||
+      difficulty === "easy" ||
+      Math.random() < 0.35;
+    if (accept) {
+      finishGame("draw", "Draw agreed", "Computer accepted the draw.");
+    } else {
+      setStatus("Draw declined — your turn");
+    }
+  }
+
+  function undo() {
+    if (gameOver || thinking || thinkingRef.current) return;
+    const chess = chessRef.current;
+    // Undo AI move then player move when possible
+    const before = chess.history().length;
+    if (before === 0) return;
+
+    chess.undo();
+    let removed = 1;
+    // If it's still not player's turn (or we undid only AI), undo one more
+    if (chess.history().length > 0 && chess.turn() !== playerColor) {
+      chess.undo();
+      removed = 2;
+    }
+    // Prefer undoing a full player+AI pair when player is to move after one undo
+    if (
+      removed === 1 &&
+      chess.history().length > 0 &&
+      chess.turn() === playerColor
+    ) {
+      // already good
+    }
+
+    setFen(chess.fen());
+    setHistory((h) => h.slice(0, -removed));
+    setViewIndex(-1);
+    setHintMove(null);
+    setGameOver(false);
+    setBanner(null);
+    setStatus("Your turn");
+    const hist = chess.history({ verbose: true });
+    const last = hist[hist.length - 1];
+    setLastMove(last ? { from: last.from, to: last.to } : null);
+  }
+
+  function showHint() {
+    if (gameOver || thinking) return;
+    const chess = chessRef.current;
+    if (chess.turn() !== playerColor) return;
+    const move = getHintMove(chess);
+    if (move) {
+      setHintMove({ from: move.from, to: move.to });
+      setStatus(`Hint: ${move.san}`);
+    }
   }
 
   const canMove =
@@ -249,35 +315,39 @@ export default function PlayComputerPage() {
               >
                 Difficulty
               </div>
-              <div style={{ display: "flex", gap: "0.35rem" }}>
-                {(["easy", "medium", "hard"] as Difficulty[]).map((d) => (
-                  <button
-                    key={d}
-                    onClick={() => setDifficulty(d)}
-                    disabled={!gameOver && history.length > 0}
-                    className="btn-secondary"
-                    style={{
-                      flex: 1,
-                      padding: "0.4rem",
-                      fontSize: "0.78rem",
-                      textTransform: "capitalize",
-                      background:
-                        difficulty === d ? "var(--accent)" : undefined,
-                      color: difficulty === d ? "#0a0a0a" : undefined,
-                      borderColor:
-                        difficulty === d ? "var(--accent)" : undefined,
-                      fontWeight: difficulty === d ? 600 : undefined,
-                      opacity: !gameOver && history.length > 0 ? 0.55 : 1,
-                    }}
-                  >
-                    {d}
-                  </button>
-                ))}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
+                {(["beginner", "easy", "medium", "hard"] as Difficulty[]).map(
+                  (d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setDifficulty(d)}
+                      disabled={!gameOver && history.length > 0}
+                      className="btn-secondary"
+                      style={{
+                        flex: "1 1 40%",
+                        padding: "0.4rem",
+                        fontSize: "0.75rem",
+                        textTransform: "capitalize",
+                        background:
+                          difficulty === d ? "var(--accent)" : undefined,
+                        color: difficulty === d ? "#0a0a0a" : undefined,
+                        borderColor:
+                          difficulty === d ? "var(--accent)" : undefined,
+                        fontWeight: difficulty === d ? 600 : undefined,
+                        opacity: !gameOver && history.length > 0 ? 0.55 : 1,
+                      }}
+                    >
+                      {d}
+                    </button>
+                  )
+                )}
               </div>
             </div>
 
             <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.4rem" }}>
               <button
+                type="button"
                 onClick={() => newGame(true)}
                 className="btn-secondary"
                 style={{ flex: 1, fontSize: "0.8rem" }}
@@ -285,6 +355,7 @@ export default function PlayComputerPage() {
                 <RotateCcw className="w-3.5 h-3.5" /> White
               </button>
               <button
+                type="button"
                 onClick={() => newGame(false)}
                 className="btn-secondary"
                 style={{ flex: 1, fontSize: "0.8rem" }}
@@ -293,14 +364,47 @@ export default function PlayComputerPage() {
               </button>
             </div>
 
-            {!gameOver && history.length > 0 && (
+            <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.35rem" }}>
               <button
-                onClick={resign}
-                className="btn-ghost"
-                style={{ width: "100%", color: "#f87171", fontSize: "0.8rem" }}
+                type="button"
+                onClick={undo}
+                disabled={gameOver || thinking || history.length === 0}
+                className="btn-secondary"
+                style={{ flex: 1, fontSize: "0.8rem" }}
               >
-                <Flag className="w-3.5 h-3.5" /> Resign
+                <Undo2 className="w-3.5 h-3.5" /> Undo
               </button>
+              <button
+                type="button"
+                onClick={showHint}
+                disabled={gameOver || thinking || !canMove}
+                className="btn-secondary"
+                style={{ flex: 1, fontSize: "0.8rem" }}
+              >
+                <Lightbulb className="w-3.5 h-3.5" /> Hint
+              </button>
+            </div>
+
+            {!gameOver && history.length > 0 && (
+              <div style={{ display: "flex", gap: "0.35rem" }}>
+                <button
+                  type="button"
+                  onClick={offerDraw}
+                  disabled={thinking}
+                  className="btn-ghost"
+                  style={{ flex: 1, fontSize: "0.8rem" }}
+                >
+                  <Handshake className="w-3.5 h-3.5" /> Draw
+                </button>
+                <button
+                  type="button"
+                  onClick={resign}
+                  className="btn-ghost"
+                  style={{ flex: 1, color: "#f87171", fontSize: "0.8rem" }}
+                >
+                  <Flag className="w-3.5 h-3.5" /> Resign
+                </button>
+              </div>
             )}
           </div>
 
