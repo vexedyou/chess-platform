@@ -36,6 +36,8 @@ export default function PlayComputerPage() {
 
   const chessRef = useRef(new Chess());
   const thinkingRef = useRef(false);
+  /** Bumped to cancel an in-flight AI timeout after undo/new game. */
+  const aiJobRef = useRef(0);
   const boardWidth = useBoardWidth(720);
 
   const viewingPast = viewIndex >= 0 && viewIndex < history.length - 1;
@@ -67,6 +69,7 @@ export default function PlayComputerPage() {
       return;
     }
 
+    const jobId = ++aiJobRef.current;
     thinkingRef.current = true;
     setThinking(true);
     setStatus("Computer is thinking…");
@@ -82,7 +85,12 @@ export default function PlayComputerPage() {
             : 80;
 
     setTimeout(() => {
+      // Cancelled by undo / new game
+      if (jobId !== aiJobRef.current) return;
+
       const move = getAIMove(chess, difficulty);
+      if (jobId !== aiJobRef.current) return;
+
       if (move) {
         const captured = !!chess.get(move.to);
         chess.move(move);
@@ -142,6 +150,7 @@ export default function PlayComputerPage() {
   }
 
   function newGame(asWhite = true) {
+    aiJobRef.current += 1;
     thinkingRef.current = false;
     const chess = new Chess();
     chessRef.current = chess;
@@ -165,7 +174,6 @@ export default function PlayComputerPage() {
 
   function offerDraw() {
     if (gameOver || thinking) return;
-    // Soft AI accepts draws in worse/equal positions roughly
     const accept =
       difficulty === "beginner" ||
       difficulty === "easy" ||
@@ -177,27 +185,53 @@ export default function PlayComputerPage() {
     }
   }
 
+  /**
+   * Take back the player's last move.
+   * - If the bot already replied: undo bot reply + player move.
+   * - If the bot is still thinking / has not moved: cancel AI and undo player only.
+   * Never leaves the position on the bot's turn without a scheduled AI move.
+   */
   function undo() {
-    if (gameOver || thinking || thinkingRef.current) return;
     const chess = chessRef.current;
-    // Undo AI move then player move when possible
-    const before = chess.history().length;
-    if (before === 0) return;
+    const halfMoves = chess.history().length;
+    if (halfMoves === 0) return;
 
-    chess.undo();
-    let removed = 1;
-    // If it's still not player's turn (or we undid only AI), undo one more
-    if (chess.history().length > 0 && chess.turn() !== playerColor) {
-      chess.undo();
-      removed = 2;
+    // Cancel any pending AI reply so it cannot apply on a stale position
+    aiJobRef.current += 1;
+    thinkingRef.current = false;
+    setThinking(false);
+
+    // Count how many of the player's moves exist in the history
+    // Verbose history: index 0 is white's first move
+    const verbose = chess.history({ verbose: true });
+    const playerHasMoved = verbose.some((m) => m.color === playerColor);
+    if (!playerHasMoved) {
+      // Only the computer's opening move exists (player is black) — nothing to take back
+      setStatus("Nothing to undo yet");
+      return;
     }
-    // Prefer undoing a full player+AI pair when player is to move after one undo
-    if (
-      removed === 1 &&
-      chess.history().length > 0 &&
-      chess.turn() === playerColor
-    ) {
-      // already good
+
+    let removed = 0;
+
+    if (chess.turn() === playerColor) {
+      // It's your turn → last move on the board is the bot's reply. Remove bot + you.
+      if (halfMoves >= 2) {
+        chess.undo(); // bot
+        chess.undo(); // player
+        removed = 2;
+      }
+    } else {
+      // Bot to move → last move is yours (bot hasn't answered, or we cancelled thinking).
+      chess.undo(); // player only
+      removed = 1;
+    }
+
+    if (removed === 0) return;
+
+    // Ensure it's the player's turn after undo
+    if (chess.turn() !== playerColor && chess.history().length > 0) {
+      chess.undo();
+      removed += 1;
     }
 
     setFen(chess.fen());
@@ -206,7 +240,7 @@ export default function PlayComputerPage() {
     setHintMove(null);
     setGameOver(false);
     setBanner(null);
-    setStatus("Your turn");
+    setStatus("Your turn — move taken back");
     const hist = chess.history({ verbose: true });
     const last = hist[hist.length - 1];
     setLastMove(last ? { from: last.from, to: last.to } : null);
@@ -228,6 +262,15 @@ export default function PlayComputerPage() {
     !thinking &&
     !viewingPast &&
     chessRef.current.turn() === playerColor;
+
+  // Enable undo whenever the player has made at least one move
+  const canUndo =
+    !gameOver &&
+    history.some((_, i) => {
+      // white moves at even indices, black at odd
+      const color = i % 2 === 0 ? "w" : "b";
+      return color === playerColor;
+    });
 
   return (
     <div
@@ -368,9 +411,10 @@ export default function PlayComputerPage() {
               <button
                 type="button"
                 onClick={undo}
-                disabled={gameOver || thinking || history.length === 0}
+                disabled={!canUndo}
                 className="btn-secondary"
                 style={{ flex: 1, fontSize: "0.8rem" }}
+                title="Take back your last move"
               >
                 <Undo2 className="w-3.5 h-3.5" /> Undo
               </button>
