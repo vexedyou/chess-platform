@@ -28,7 +28,7 @@ export default function HomePage() {
           href="/play/computer"
           icon={<Bot className="w-6 h-6" />}
           title="vs Computer"
-          description="Three difficulty levels. Practice openings, middlegames, and endgames anytime."
+          description="Four difficulty levels, undo, hints, draw offers — solid solo practice."
         />
         <FeatureCard
           href="/play/online"
@@ -40,7 +40,7 @@ export default function HomePage() {
           href="/puzzles"
           icon={<Puzzle className="w-6 h-6" />}
           title="Tactics"
-          description="Sharpen pattern recognition with mates, forks, and classic combinations."
+          description="40+ puzzles with theme & difficulty filters, streaks, hints, and solutions."
         />
         <FeatureCard
           href="/analysis"
