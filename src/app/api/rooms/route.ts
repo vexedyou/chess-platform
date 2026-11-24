@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createRoom, publicRoom } from "@/lib/rooms";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {

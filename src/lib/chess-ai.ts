@@ -36,12 +36,8 @@ function getSquareIndex(square: Square, isWhite: boolean): number {
 }
 
 function evaluateBoard(chess: Chess): number {
-  if (chess.isCheckmate()) {
-    return chess.turn() === "w" ? -99999 : 99999;
-  }
-  if (chess.isDraw() || chess.isStalemate() || chess.isThreefoldRepetition()) {
-    return 0;
-  }
+  if (chess.isCheckmate()) return chess.turn() === "w" ? -99999 : 99999;
+  if (chess.isDraw() || chess.isStalemate() || chess.isThreefoldRepetition()) return 0;
 
   let score = 0;
   const board = chess.board();
@@ -50,44 +46,37 @@ function evaluateBoard(chess: Chess): number {
     for (let file = 0; file < 8; file++) {
       const piece = board[rank][file];
       if (!piece) continue;
-
       const isWhite = piece.color === "w";
       const type = piece.type;
       const value = PIECE_VALUES[type] || 0;
       const square = (String.fromCharCode(97 + file) + (8 - rank)) as Square;
       const idx = getSquareIndex(square, isWhite);
-
       let pst = 0;
       switch (type) {
-        case "p":
-          pst = PAWN_TABLE[idx];
-          break;
-        case "n":
-          pst = KNIGHT_TABLE[idx];
-          break;
-        case "b":
-          pst = BISHOP_TABLE[idx];
-          break;
-        case "r":
-          pst = ROOK_TABLE[idx];
-          break;
-        case "q":
-          pst = QUEEN_TABLE[idx];
-          break;
-        case "k":
-          pst = KING_TABLE[idx];
-          break;
+        case "p": pst = PAWN_TABLE[idx]; break;
+        case "n": pst = KNIGHT_TABLE[idx]; break;
+        case "b": pst = BISHOP_TABLE[idx]; break;
+        case "r": pst = ROOK_TABLE[idx]; break;
+        case "q": pst = QUEEN_TABLE[idx]; break;
+        case "k": pst = KING_TABLE[idx]; break;
       }
-
-      const total = value + pst;
-      score += isWhite ? total : -total;
+      score += isWhite ? value + pst : -(value + pst);
     }
   }
-
-  const moves = chess.moves().length;
-  score += chess.turn() === "w" ? moves * 2 : -moves * 2;
-
   return score;
+}
+
+/** Captures / checks first so alpha-beta prunes faster. */
+function orderedMoves(chess: Chess): Move[] {
+  const moves = chess.moves({ verbose: true });
+  moves.sort((a, b) => {
+    const capA = a.captured ? PIECE_VALUES[a.captured] || 0 : 0;
+    const capB = b.captured ? PIECE_VALUES[b.captured] || 0 : 0;
+    if (capA !== capB) return capB - capA;
+    const promo = (m: Move) => (m.promotion === "q" ? 1 : 0);
+    return promo(b) - promo(a);
+  });
+  return moves;
 }
 
 function minimax(
@@ -97,12 +86,9 @@ function minimax(
   beta: number,
   maximizing: boolean
 ): number {
-  if (depth === 0 || chess.isGameOver()) {
-    return evaluateBoard(chess);
-  }
+  if (depth === 0 || chess.isGameOver()) return evaluateBoard(chess);
 
-  const moves = chess.moves({ verbose: true });
-
+  const moves = orderedMoves(chess);
   if (maximizing) {
     let maxEval = -Infinity;
     for (const move of moves) {
@@ -114,30 +100,23 @@ function minimax(
       if (beta <= alpha) break;
     }
     return maxEval;
-  } else {
-    let minEval = Infinity;
-    for (const move of moves) {
-      chess.move(move);
-      const evalScore = minimax(chess, depth - 1, alpha, beta, true);
-      chess.undo();
-      minEval = Math.min(minEval, evalScore);
-      beta = Math.min(beta, evalScore);
-      if (beta <= alpha) break;
-    }
-    return minEval;
   }
+  let minEval = Infinity;
+  for (const move of moves) {
+    chess.move(move);
+    const evalScore = minimax(chess, depth - 1, alpha, beta, true);
+    chess.undo();
+    minEval = Math.min(minEval, evalScore);
+    beta = Math.min(beta, evalScore);
+    if (beta <= alpha) break;
+  }
+  return minEval;
 }
 
 export function getBestMove(chess: Chess, depth: number = 2): Move | null {
   if (chess.isGameOver()) return null;
-
-  const moves = chess.moves({ verbose: true });
+  const moves = orderedMoves(chess);
   if (moves.length === 0) return null;
-
-  for (let i = moves.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [moves[i], moves[j]] = [moves[j], moves[i]];
-  }
 
   let bestMove: Move | null = null;
   let bestScore = chess.turn() === "w" ? -Infinity : Infinity;
@@ -147,29 +126,18 @@ export function getBestMove(chess: Chess, depth: number = 2): Move | null {
     chess.move(move);
     const score = minimax(chess, depth - 1, -Infinity, Infinity, !maximizing);
     chess.undo();
-
-    if (maximizing) {
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = move;
-      }
-    } else {
-      if (score < bestScore) {
-        bestScore = score;
-        bestMove = move;
-      }
+    if (maximizing ? score > bestScore : score < bestScore) {
+      bestScore = score;
+      bestMove = move;
     }
   }
-
   return bestMove;
 }
 
-/** Score all legal moves (for hints / soft play). */
-export function rankMoves(chess: Chess, depth: number = 1): { move: Move; score: number }[] {
-  const moves = chess.moves({ verbose: true });
+export function rankMoves(chess: Chess, depth: number = 0): { move: Move; score: number }[] {
+  const moves = orderedMoves(chess);
   const maximizing = chess.turn() === "w";
   const ranked: { move: Move; score: number }[] = [];
-
   for (const move of moves) {
     chess.move(move);
     const score =
@@ -179,7 +147,6 @@ export function rankMoves(chess: Chess, depth: number = 1): { move: Move; score:
     chess.undo();
     ranked.push({ move, score });
   }
-
   ranked.sort((a, b) => (maximizing ? b.score - a.score : a.score - b.score));
   return ranked;
 }
@@ -192,32 +159,26 @@ export function getAIMove(chess: Chess, difficulty: Difficulty): Move | null {
   if (moves.length === 0) return null;
 
   if (difficulty === "beginner") {
-    // ~55% random legal move, otherwise shallow best
     if (Math.random() < 0.55) {
       return moves[Math.floor(Math.random() * moves.length)];
     }
     const ranked = rankMoves(chess, 0);
-    // Pick among top half of "good enough" moves
     const pool = ranked.slice(0, Math.max(1, Math.ceil(ranked.length / 2)));
     return pool[Math.floor(Math.random() * pool.length)]?.move ?? moves[0];
   }
 
   if (difficulty === "easy") {
-    // Sometimes blunder: pick random among weaker moves
-    if (Math.random() < 0.3) {
+    if (Math.random() < 0.25) {
       return moves[Math.floor(Math.random() * moves.length)];
     }
     return getBestMove(chess, 1);
   }
 
-  const depths: Record<Exclude<Difficulty, "beginner" | "easy">, number> = {
-    medium: 2,
-    hard: 3,
-  };
-  return getBestMove(chess, depths[difficulty]);
+  // medium = depth 1 (fast), hard = depth 2 (still responsive)
+  if (difficulty === "medium") return getBestMove(chess, 1);
+  return getBestMove(chess, 2);
 }
 
-/** Best move for hint display. */
 export function getHintMove(chess: Chess): Move | null {
-  return getBestMove(chess, 2);
+  return getBestMove(chess, 1);
 }
