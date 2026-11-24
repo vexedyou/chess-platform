@@ -4,7 +4,7 @@ import {
   getRoom,
   publicRoom,
   saveRoom,
-  upsertRoom,
+  touchPresence,
   START_FEN,
 } from "@/lib/rooms";
 
@@ -16,8 +16,20 @@ type Ctx = { params: Promise<{ code: string }> };
 export async function GET(req: NextRequest, ctx: Ctx) {
   const { code } = await ctx.params;
   const playerId = req.nextUrl.searchParams.get("playerId") || "";
-  const room = getRoom(code);
-  if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
+  const roleParam = req.nextUrl.searchParams.get("role");
+  const role =
+    roleParam === "host" || roleParam === "guest" ? roleParam : null;
+
+  let room = await getRoom(code);
+  if (!room) {
+    return NextResponse.json({ error: "Room not found" }, { status: 404 });
+  }
+
+  // Presence ping on GET so both sides stay "online"
+  if (playerId && role) {
+    room = await touchPresence(code, playerId, role);
+  }
+
   return NextResponse.json(publicRoom(room, playerId));
 }
 
@@ -30,51 +42,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ error: "playerId required" }, { status: 400 });
   }
 
-  // Host heartbeat: re-publish full state so other instances can see the room
-  if (action === "heartbeat") {
-    const room = upsertRoom(code.toUpperCase(), {
-      hostId: playerId,
-      fen: body.fen,
-      history: body.history,
-      lastMove: body.lastMove,
-      status: body.status,
-      gameOver: body.gameOver,
-      guestId: body.guestId,
-    });
-    // Clear pending move once host acknowledges
-    if (body.clearPending) room.pendingGuestMove = null;
-    saveRoom(room);
-    return NextResponse.json(publicRoom(room, playerId));
-  }
-
-  let room = getRoom(code);
-
   if (action === "join") {
-    if (!room) {
-      // Soft create as guest wait — host heartbeat will fill state
-      room = upsertRoom(code.toUpperCase(), {
-        hostId: "unknown",
-        guestId: playerId,
-        status: "Waiting for host…",
-      });
-    }
-    if (playerId === room.hostId) {
-      return NextResponse.json(publicRoom(room, playerId));
-    }
-    if (room.guestId && room.guestId !== playerId && room.hostId !== "unknown") {
-      return NextResponse.json({ error: "Room is full" }, { status: 403 });
-    }
-    room.guestId = playerId;
-    if (!room.gameOver && room.hostId !== "unknown") {
-      room.status =
-        room.history.length === 0
-          ? "Both connected. White to move."
-          : room.status;
-    }
-    saveRoom(room);
+    const room = await touchPresence(code, playerId, "guest");
     return NextResponse.json(publicRoom(room, playerId));
   }
 
+  if (action === "presence") {
+    const role = body.role === "guest" ? "guest" : "host";
+    const room = await touchPresence(code, playerId, role);
+    return NextResponse.json(publicRoom(room, playerId));
+  }
+
+  let room = await getRoom(code);
   if (!room) {
     return NextResponse.json({ error: "Room not found" }, { status: 404 });
   }
@@ -83,48 +62,54 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const from = String(body.from || "");
     const to = String(body.to || "");
     const promotion = body.promotion || "q";
+    if (!from || !to) {
+      return NextResponse.json({ error: "from/to required" }, { status: 400 });
+    }
+
+    // Refresh ids from presence
     const isHost = playerId === room.hostId;
     const isGuest = playerId === room.guestId;
     if (!isHost && !isGuest) {
-      return NextResponse.json({ error: "Not in room" }, { status: 403 });
+      // Allow late bind: if no guest yet, claim guest on black move attempt
+      if (!room.guestId && room.hostId !== playerId) {
+        room.guestId = playerId;
+        room.guestSeenAt = Date.now();
+      } else {
+        return NextResponse.json({ error: "Not in room" }, { status: 403 });
+      }
     }
+
     if (room.gameOver) {
       return NextResponse.json({ error: "Game over" }, { status: 400 });
     }
 
-    // Guest moves are queued for host to apply via heartbeat/poll
-    if (isGuest) {
-      room.pendingGuestMove = { from, to, promotion, playerId };
-      saveRoom(room);
-      return NextResponse.json(publicRoom(room, playerId));
-    }
-
-    // Host applies move authoritatively
     let chess: Chess;
     try {
       chess = new Chess(room.fen);
     } catch {
       return NextResponse.json({ error: "Invalid position" }, { status: 500 });
     }
-    if (chess.turn() !== "w" && isHost) {
-      // Host is always white; if not white's turn reject
-    }
+
     const turn = chess.turn();
-    if ((turn === "w" && !isHost) || (turn === "b" && !isGuest)) {
+    const actingHost = playerId === room.hostId;
+    const actingGuest = playerId === room.guestId;
+    if ((turn === "w" && !actingHost) || (turn === "b" && !actingGuest)) {
       return NextResponse.json({ error: "Not your turn" }, { status: 400 });
     }
+
     let move;
     try {
       move = chess.move({ from, to, promotion });
     } catch {
       move = null;
     }
-    if (!move) return NextResponse.json({ error: "Illegal move" }, { status: 400 });
+    if (!move) {
+      return NextResponse.json({ error: "Illegal move" }, { status: 400 });
+    }
 
     room.fen = chess.fen();
     room.history = [...room.history, move.san];
     room.lastMove = { from: move.from, to: move.to };
-    room.pendingGuestMove = null;
 
     if (chess.isCheckmate()) {
       room.status = "Checkmate!";
@@ -143,7 +128,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     } else {
       room.status = turn === "w" ? "Black to move" : "White to move";
     }
-    saveRoom(room);
+
+    if (actingHost) room.hostSeenAt = Date.now();
+    if (actingGuest) room.guestSeenAt = Date.now();
+
+    await saveRoom(room);
     return NextResponse.json(publicRoom(room, playerId));
   }
 
@@ -155,11 +144,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     room.history = [];
     room.lastMove = null;
     room.gameOver = false;
-    room.pendingGuestMove = null;
     room.status = room.guestId
       ? "New game. White to move."
       : "Waiting for opponent…";
-    saveRoom(room);
+    await saveRoom(room);
     return NextResponse.json(publicRoom(room, playerId));
   }
 

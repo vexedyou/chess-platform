@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
     if (!playerId) {
       return NextResponse.json({ error: "playerId required" }, { status: 400 });
     }
-    const room = createRoom(playerId);
+    const room = await createRoom(playerId);
     return NextResponse.json(publicRoom(room, playerId));
   } catch {
     return NextResponse.json({ error: "Failed to create room" }, { status: 500 });
