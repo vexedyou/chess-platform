@@ -40,25 +40,26 @@ function kvEnv(): { url: string; token: string } | null {
     process.env.UPSTASH_REDIS_REST_TOKEN ||
     "";
   if (!url || !token) return null;
-  return { url, token };
+  return { url: url.replace(/\/$/, ""), token };
 }
 
 async function kvGet(code: string): Promise<Room | null> {
+  const key = code.toUpperCase();
   const env = kvEnv();
-  if (!env) return mem().get(code.toUpperCase()) ?? null;
+  if (!env) return mem().get(key) ?? null;
   try {
-    const res = await fetch(`${env.url}/get/pp:room:${code.toUpperCase()}`, {
+    const res = await fetch(`${env.url}/get/pp:room:${key}`, {
       headers: { Authorization: `Bearer ${env.token}` },
       cache: "no-store",
     });
-    if (!res.ok) return mem().get(code.toUpperCase()) ?? null;
+    if (!res.ok) return mem().get(key) ?? null;
     const data = (await res.json()) as { result?: string | null };
-    if (!data.result) return mem().get(code.toUpperCase()) ?? null;
+    if (!data.result) return mem().get(key) ?? null;
     const room = JSON.parse(data.result) as Room;
     mem().set(room.code, room);
     return room;
   } catch {
-    return mem().get(code.toUpperCase()) ?? null;
+    return mem().get(key) ?? null;
   }
 }
 
@@ -67,21 +68,22 @@ async function kvSet(room: Room): Promise<void> {
   const env = kvEnv();
   if (!env) return;
   try {
-    await fetch(`${env.url}/set/pp:room:${room.code}`, {
+    await fetch(env.url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(room),
-    });
-    // Expire after 2 hours
-    await fetch(`${env.url}/expire/pp:room:${room.code}/7200`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.token}` },
+      body: JSON.stringify([
+        "SET",
+        `pp:room:${room.code}`,
+        JSON.stringify(room),
+        "EX",
+        "7200",
+      ]),
     });
   } catch {
-    /* memory still holds it */
+    /* memory still holds it on this instance */
   }
 }
 
@@ -126,7 +128,7 @@ export async function saveRoom(room: Room): Promise<void> {
   await kvSet(room);
 }
 
-/** Merge presence + optional game fields without wiping the other player. */
+/** Merge presence without wiping the other player. */
 export async function touchPresence(
   code: string,
   playerId: string,
@@ -153,10 +155,11 @@ export async function touchPresence(
     };
   } else {
     if (role === "host") {
-      room.hostId = playerId;
+      if (room.hostId === "unknown" || room.hostId === playerId) {
+        room.hostId = playerId;
+      }
       room.hostSeenAt = now;
     } else {
-      // Don't steal host seat
       if (room.hostId === playerId) {
         room.hostSeenAt = now;
       } else {
@@ -173,11 +176,14 @@ export async function touchPresence(
       if (gamePatch.gameOver != null) room.gameOver = gamePatch.gameOver;
     }
 
-    // Connected status
-    const guestFresh = room.guestId && now - room.guestSeenAt < 8000;
-    const hostFresh = room.hostId !== "unknown" && now - room.hostSeenAt < 8000;
+    const guestFresh = !!(room.guestId && now - room.guestSeenAt < 10000);
+    const hostFresh =
+      room.hostId !== "unknown" && now - room.hostSeenAt < 10000;
     if (guestFresh && hostFresh && !room.gameOver) {
-      if (room.history.length === 0 && room.status.startsWith("Waiting")) {
+      if (
+        room.history.length === 0 &&
+        (room.status.startsWith("Waiting") || room.status.includes("host"))
+      ) {
         room.status = "Both connected. White to move.";
       }
     }
@@ -190,8 +196,9 @@ export async function touchPresence(
 
 export function publicRoom(room: Room, playerId: string) {
   const now = Date.now();
-  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 8000);
-  const hostOnline = room.hostId !== "unknown" && now - room.hostSeenAt < 8000;
+  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 10000);
+  const hostOnline =
+    room.hostId !== "unknown" && now - room.hostSeenAt < 10000;
 
   let yourColor: "w" | "b" | null = null;
   if (playerId === room.hostId) yourColor = "w";
