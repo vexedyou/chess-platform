@@ -62,6 +62,7 @@ function OnlinePlayInner() {
   const prevHistoryLen = useRef(0);
   const bootstrapped = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const presenceRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const boardWidth = useBoardWidth(720);
 
   useEffect(() => {
@@ -109,17 +110,23 @@ function OnlinePlayInner() {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    if (presenceRef.current) {
+      clearInterval(presenceRef.current);
+      presenceRef.current = null;
+    }
   }, []);
 
   useEffect(() => () => stopPoll(), [stopPoll]);
 
   /**
-   * Apply server room data without ever rewinding the board mid-game.
-   * Presence (playerCount) always updates; fen/history only advance with gameSeq.
+   * Apply server data. Always accept longer history or higher gameSeq.
+   * Never rewind mid-game unless forced reset.
    */
   const applyRoom = useCallback((data: PublicRoom, opts?: { force?: boolean }) => {
     if (data.yourColor) setYourColor(data.yourColor);
-    setConnected(data.playerCount >= 2);
+    if (typeof data.playerCount === "number") {
+      setConnected(data.playerCount >= 2);
+    }
     setRoomCode(data.code);
     setPhase("playing");
     setError("");
@@ -129,7 +136,6 @@ function OnlinePlayInner() {
     const localLen = gameRef.current.history.length;
     const remoteLen = data.history?.length ?? 0;
 
-    // Explicit force (reset response) or strictly newer game version
     const isReset =
       remoteSeq > localSeq &&
       remoteLen === 0 &&
@@ -137,24 +143,23 @@ function OnlinePlayInner() {
         data.status.includes("White to move") ||
         data.status.startsWith("Waiting"));
 
-    const shouldApplyGame =
-      opts?.force ||
-      remoteSeq > localSeq ||
-      (remoteSeq === localSeq && remoteLen >= localLen);
+    // Always take a longer history from the server (opponent move)
+    const longerHistory = remoteLen > localLen;
+    const newerSeq = remoteSeq > localSeq;
 
-    // Hard guard: never apply a shorter history unless it's a versioned reset
     if (!opts?.force && remoteLen < localLen && !isReset) {
+      // Server behind our optimistic move — keep local
       return;
     }
 
-    if (!shouldApplyGame && !isReset) {
+    if (!opts?.force && !longerHistory && !newerSeq && !isReset) {
       return;
     }
 
     gameSeqRef.current = Math.max(localSeq, remoteSeq);
     const next: GameState = {
       fen: data.fen,
-      history: data.history,
+      history: data.history || [],
       lastMove: data.lastMove,
       status: data.status,
       gameOver: data.gameOver,
@@ -163,7 +168,27 @@ function OnlinePlayInner() {
     setGame(next);
   }, []);
 
-  const pollOnce = useCallback(
+  /** Read-only game poll — no write, cannot clobber moves. */
+  const pollGame = useCallback(
+    async (code: string) => {
+      const pid = playerIdRef.current || makePlayerId();
+      try {
+        const res = await fetch(
+          `/api/rooms/${code}?playerId=${encodeURIComponent(pid)}&_=${Date.now()}`,
+          { cache: "no-store" }
+        );
+        if (res.ok) {
+          applyRoom((await res.json()) as PublicRoom);
+        }
+      } catch {
+        /* keep local */
+      }
+    },
+    [applyRoom]
+  );
+
+  /** Presence heartbeat — infrequent write. */
+  const sendPresence = useCallback(
     async (code: string, r: "host" | "guest") => {
       const pid = playerIdRef.current || makePlayerId();
       try {
@@ -174,19 +199,9 @@ function OnlinePlayInner() {
         });
         if (res.ok) {
           applyRoom((await res.json()) as PublicRoom);
-          return;
         }
-        if (res.status === 404) {
-          // Room lost on this instance — keep local board, don't wipe
-          return;
-        }
-        const g = await fetch(
-          `/api/rooms/${code}?playerId=${encodeURIComponent(pid)}&role=${r}`,
-          { cache: "no-store" }
-        );
-        if (g.ok) applyRoom((await g.json()) as PublicRoom);
       } catch {
-        /* keep local state */
+        /* */
       }
     },
     [applyRoom]
@@ -194,13 +209,18 @@ function OnlinePlayInner() {
 
   function startPolling(code: string, r: "host" | "guest") {
     stopPoll();
-    void pollOnce(code, r);
+    void pollGame(code);
+    void sendPresence(code, r);
+    // Fast read-only poll for moves
     pollRef.current = setInterval(() => {
-      void pollOnce(code, r);
-    }, 700);
+      void pollGame(code);
+    }, 600);
+    // Slow presence so we don't race-write over moves
+    presenceRef.current = setInterval(() => {
+      void sendPresence(code, r);
+    }, 3000);
   }
 
-  /** Host creates a brand-new room. */
   const startHost = useCallback(async () => {
     stopPoll();
     setPhase("connecting");
@@ -238,7 +258,6 @@ function OnlinePlayInner() {
     }
   }, [applyRoom, router, stopPoll]);
 
-  /** Re-attach to an existing room (refresh / open link) without creating a new one. */
   const rejoinRoom = useCallback(
     async (code: string, r: "host" | "guest") => {
       stopPoll();
@@ -343,7 +362,6 @@ function OnlinePlayInner() {
     } catch {
       /* */
     }
-    // Rejoin existing room — never create a second room on refresh
     if (isHost) void rejoinRoom(code, "host");
     else void startGuest(code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -374,7 +392,6 @@ function OnlinePlayInner() {
             : "Opponent's turn",
       gameOver: chess.isGameOver(),
     };
-    // Optimistic seq so presence can't rewind before server confirms
     gameSeqRef.current += 1;
     gameRef.current = optimistic;
     setGame(optimistic);
@@ -395,9 +412,12 @@ function OnlinePlayInner() {
       });
       if (res.ok) {
         applyRoom((await res.json()) as PublicRoom, { force: true });
+      } else {
+        // Pull server truth
+        void pollGame(roomCode);
       }
     } catch {
-      /* keep optimistic; next successful poll/move will resync */
+      void pollGame(roomCode);
     }
   }
 
@@ -537,8 +557,8 @@ function OnlinePlayInner() {
   const viewingPast = viewIndex >= 0 && viewIndex < game.history.length - 1;
   const displayFen = viewingPast ? fenAfterMoves(game.history, viewIndex) : game.fen;
   const displayLast = viewingPast ? lastMoveAt(game.history, viewIndex) : game.lastMove;
+  // Allow moves even if presence is briefly stale — color + turn is enough
   const canMove =
-    connected &&
     !game.gameOver &&
     !viewingPast &&
     yourColor !== null &&
@@ -558,59 +578,65 @@ function OnlinePlayInner() {
             boardWidth={boardWidth}
           />
         </div>
-        <div className="game-side" style={{ width: "100%", maxWidth: 340 }}>
+
+        <div className="game-side" style={{ width: "100%", maxWidth: "20rem" }}>
+          <div className="card" style={{ padding: "1.25rem", marginBottom: "1rem" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <Users style={{ width: 20, height: 20, color: "var(--accent)" }} />
+                <h2 style={{ fontWeight: 600, fontSize: "1.125rem", margin: 0 }}>Room {roomCode}</h2>
+              </div>
+              <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: connected ? "#34d399" : "#fbbf24" }}>
+                {connected ? <Wifi style={{ width: 14, height: 14 }} /> : <WifiOff style={{ width: 14, height: 14 }} />}
+                {connected ? "Live" : "Waiting"}
+              </span>
+            </div>
+
+            <p style={{ fontSize: "0.875rem", fontWeight: 500, marginBottom: "1rem" }}>{game.status}</p>
+
+            {error && <p style={{ color: "#f87171", fontSize: "0.875rem", marginBottom: "0.75rem" }}>{error}</p>}
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem" }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>You are</span>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>
+                {yourColor === "w" ? "White" : yourColor === "b" ? "Black" : "…"}
+              </span>
+            </div>
+
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <button onClick={copyCode} className="btn-secondary" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14 }}>
+                {copied ? <Check style={{ width: 16, height: 16 }} /> : <Copy style={{ width: 16, height: 16 }} />}
+                Code
+              </button>
+              <button onClick={copyLink} className="btn-secondary" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14 }}>
+                <Link2 style={{ width: 16, height: 16 }} /> Link
+              </button>
+            </div>
+
+            <button onClick={() => void newGame()} className="btn-ghost" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14 }}>
+              <RotateCcw style={{ width: 16, height: 16 }} /> New Game
+            </button>
+            <button onClick={leave} className="btn-ghost" style={{ width: "100%", marginTop: 4, fontSize: 13, color: "var(--muted)" }}>
+              Leave room
+            </button>
+          </div>
+
           {banner && (
             <GameBanner
               kind={banner.kind}
               title={banner.title}
               subtitle={banner.subtitle}
-              actionLabel="New game"
-              onAction={() => void newGame()}
-              onDismiss={() => setBanner(null)}
+              onClose={() => setBanner(null)}
             />
           )}
-          <div className="card" style={{ padding: "1.2rem", marginBottom: "0.85rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.65rem" }}>
-              <Users style={{ width: 20, height: 20, color: "var(--accent)" }} />
-              <h2 style={{ fontWeight: 600, fontSize: "1.1rem", margin: 0 }}>Room {roomCode}</h2>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.8rem", color: connected ? "var(--accent)" : "var(--muted)", marginBottom: "0.55rem" }}>
-              {connected ? <Wifi style={{ width: 14, height: 14 }} /> : <WifiOff style={{ width: 14, height: 14 }} />}
-              {connected ? "Opponent connected" : "Waiting for opponent…"}
-            </div>
-            <p style={{ fontSize: "0.9rem", fontWeight: 500, marginBottom: "0.65rem" }}>
-              {viewingPast ? "Viewing past move" : game.status}
-            </p>
-            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.65rem", fontSize: "0.875rem" }}>
-              <span style={{ color: "var(--muted)" }}>You are</span>
-              <strong>
-                {yourColor === "w" ? "White" : yourColor === "b" ? "Black" : role === "host" ? "White" : "…"}
-              </strong>
-              {connected && !game.gameOver && !viewingPast && yourColor && (
-                <span style={{ color: "var(--muted)", marginLeft: "auto" }}>
-                  {turn === yourColor ? "Your turn" : "Their turn"}
-                </span>
-              )}
-            </div>
-            {error && (
-              <p style={{ color: "#f87171", fontSize: "0.8rem", marginBottom: "0.65rem" }}>{error}</p>
-            )}
-            <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.4rem" }}>
-              <button onClick={copyCode} className="btn-secondary" style={{ flex: 1 }}>
-                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />} Code
-              </button>
-              <button onClick={copyLink} className="btn-secondary" style={{ flex: 1 }}>
-                <Link2 className="w-4 h-4" /> Link
-              </button>
-            </div>
-            <button onClick={() => void newGame()} className="btn-ghost" style={{ width: "100%" }} disabled={!connected}>
-              <RotateCcw className="w-4 h-4" /> New Game
-            </button>
-            <button onClick={leave} className="btn-ghost" style={{ width: "100%", marginTop: "0.15rem" }}>
-              Leave room
-            </button>
+
+          <div className="card" style={{ padding: "1.25rem" }}>
+            <MoveHistory
+              history={game.history}
+              viewIndex={viewIndex}
+              onSelect={setViewIndex}
+            />
           </div>
-          <MoveHistory history={game.history} viewIndex={viewIndex} onViewIndex={setViewIndex} />
         </div>
       </div>
     </div>
@@ -619,7 +645,13 @@ function OnlinePlayInner() {
 
 export default function OnlinePlayPage() {
   return (
-    <Suspense fallback={<div style={{ padding: "3rem", textAlign: "center", color: "var(--muted)" }}>Loading…</div>}>
+    <Suspense
+      fallback={
+        <div style={{ padding: "4rem", textAlign: "center", color: "var(--muted)" }}>
+          Loading…
+        </div>
+      }
+    >
       <OnlinePlayInner />
     </Suspense>
   );
