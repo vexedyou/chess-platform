@@ -1,6 +1,6 @@
 /**
  * Room store for online multiplayer.
- * Uses Vercel KV / Upstash Redis REST when env is set; otherwise in-memory.
+ * Game position is versioned with gameSeq so presence pings cannot rewind the board.
  */
 
 export type Room = {
@@ -10,10 +10,13 @@ export type Room = {
   lastMove: { from: string; to: string } | null;
   status: string;
   gameOver: boolean;
+  /** Increments only on move / reset — never on presence. */
+  gameSeq: number;
   hostId: string;
   guestId: string | null;
   hostSeenAt: number;
   guestSeenAt: number;
+  /** Bumped on any change (presence or game). */
   updatedAt: number;
 };
 
@@ -56,6 +59,7 @@ async function kvGet(code: string): Promise<Room | null> {
     const data = (await res.json()) as { result?: string | null };
     if (!data.result) return mem().get(key) ?? null;
     const room = JSON.parse(data.result) as Room;
+    if (typeof room.gameSeq !== "number") room.gameSeq = room.history?.length ?? 0;
     mem().set(room.code, room);
     return room;
   } catch {
@@ -109,6 +113,7 @@ export async function createRoom(hostId: string): Promise<Room> {
     lastMove: null,
     status: "Waiting for opponent…",
     gameOver: false,
+    gameSeq: 0,
     hostId,
     guestId: null,
     hostSeenAt: now,
@@ -128,67 +133,52 @@ export async function saveRoom(room: Room): Promise<void> {
   await kvSet(room);
 }
 
-/** Merge presence without wiping the other player. */
+/**
+ * Update presence only. Does NOT create rooms and never rewinds game state.
+ * Returns null if the room does not exist.
+ */
 export async function touchPresence(
   code: string,
   playerId: string,
-  role: "host" | "guest",
-  gamePatch?: Partial<Pick<Room, "fen" | "history" | "lastMove" | "status" | "gameOver">>
-): Promise<Room> {
+  role: "host" | "guest"
+): Promise<Room | null> {
   const key = code.toUpperCase();
-  let room = await kvGet(key);
+  const room = await kvGet(key);
+  if (!room) return null;
+
   const now = Date.now();
 
-  if (!room) {
-    room = {
-      code: key,
-      fen: gamePatch?.fen || START_FEN,
-      history: gamePatch?.history || [],
-      lastMove: gamePatch?.lastMove ?? null,
-      status: gamePatch?.status || "Waiting for opponent…",
-      gameOver: !!gamePatch?.gameOver,
-      hostId: role === "host" ? playerId : "unknown",
-      guestId: role === "guest" ? playerId : null,
-      hostSeenAt: role === "host" ? now : 0,
-      guestSeenAt: role === "guest" ? now : 0,
-      updatedAt: now,
-    };
+  if (role === "host") {
+    if (room.hostId === "unknown" || room.hostId === playerId) {
+      room.hostId = playerId;
+    }
+    // Only the real host updates hostSeenAt
+    if (room.hostId === playerId) room.hostSeenAt = now;
   } else {
-    if (role === "host") {
-      if (room.hostId === "unknown" || room.hostId === playerId) {
-        room.hostId = playerId;
-      }
+    if (room.hostId === playerId) {
       room.hostSeenAt = now;
     } else {
-      if (room.hostId === playerId) {
-        room.hostSeenAt = now;
-      } else {
+      // Claim / refresh guest seat
+      if (!room.guestId || room.guestId === playerId) {
         room.guestId = playerId;
-        room.guestSeenAt = now;
       }
-    }
-
-    if (gamePatch) {
-      if (gamePatch.fen != null) room.fen = gamePatch.fen;
-      if (gamePatch.history != null) room.history = gamePatch.history;
-      if (gamePatch.lastMove !== undefined) room.lastMove = gamePatch.lastMove;
-      if (gamePatch.status != null) room.status = gamePatch.status;
-      if (gamePatch.gameOver != null) room.gameOver = gamePatch.gameOver;
-    }
-
-    const guestFresh = !!(room.guestId && now - room.guestSeenAt < 10000);
-    const hostFresh =
-      room.hostId !== "unknown" && now - room.hostSeenAt < 10000;
-    if (guestFresh && hostFresh && !room.gameOver) {
-      if (
-        room.history.length === 0 &&
-        (room.status.startsWith("Waiting") || room.status.includes("host"))
-      ) {
-        room.status = "Both connected. White to move.";
-      }
+      if (room.guestId === playerId) room.guestSeenAt = now;
     }
   }
 
+  const guestFresh = !!(room.guestId && now - room.guestSeenAt < 12000);
+  const hostFresh =
+    room.hostId !== "unknown" && now - room.hostSeenAt < 12000;
+  if (guestFresh && hostFresh && !room.gameOver) {
+    if (
+      room.history.length === 0 &&
+      (room.status.startsWith("Waiting") || room.status.includes("host"))
+    ) {
+      room.status = "Both connected. White to move.";
+    }
+  }
+
+  // Presence only — do not bump gameSeq
   room.updatedAt = now;
   await kvSet(room);
   return room;
@@ -196,9 +186,9 @@ export async function touchPresence(
 
 export function publicRoom(room: Room, playerId: string) {
   const now = Date.now();
-  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 10000);
+  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 12000);
   const hostOnline =
-    room.hostId !== "unknown" && now - room.hostSeenAt < 10000;
+    room.hostId !== "unknown" && now - room.hostSeenAt < 12000;
 
   let yourColor: "w" | "b" | null = null;
   if (playerId === room.hostId) yourColor = "w";
@@ -211,6 +201,7 @@ export function publicRoom(room: Room, playerId: string) {
     lastMove: room.lastMove,
     status: room.status,
     gameOver: room.gameOver,
+    gameSeq: room.gameSeq ?? 0,
     playerCount: (hostOnline ? 1 : 0) + (guestOnline ? 1 : 0),
     yourColor,
     updatedAt: room.updatedAt,

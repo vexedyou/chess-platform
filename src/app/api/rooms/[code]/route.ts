@@ -25,9 +25,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ error: "Room not found" }, { status: 404 });
   }
 
-  // Presence ping on GET so both sides stay "online"
   if (playerId && role) {
-    room = await touchPresence(code, playerId, role);
+    const touched = await touchPresence(code, playerId, role);
+    if (touched) room = touched;
   }
 
   return NextResponse.json(publicRoom(room, playerId));
@@ -43,13 +43,30 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   }
 
   if (action === "join") {
+    // Never soft-create — guest must join a room the host already created
     const room = await touchPresence(code, playerId, "guest");
+    if (!room) {
+      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    }
     return NextResponse.json(publicRoom(room, playerId));
   }
 
   if (action === "presence") {
     const role = body.role === "guest" ? "guest" : "host";
     const room = await touchPresence(code, playerId, role);
+    if (!room) {
+      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    }
+    return NextResponse.json(publicRoom(room, playerId));
+  }
+
+  // Host re-attach after refresh (same code, claim host seat without new room)
+  if (action === "rejoin") {
+    const role = body.role === "guest" ? "guest" : "host";
+    const room = await touchPresence(code, playerId, role);
+    if (!room) {
+      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+    }
     return NextResponse.json(publicRoom(room, playerId));
   }
 
@@ -66,14 +83,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       return NextResponse.json({ error: "from/to required" }, { status: 400 });
     }
 
-    // Refresh ids from presence
-    const isHost = playerId === room.hostId;
-    const isGuest = playerId === room.guestId;
+    let isHost = playerId === room.hostId;
+    let isGuest = playerId === room.guestId;
     if (!isHost && !isGuest) {
-      // Allow late bind: if no guest yet, claim guest on black move attempt
       if (!room.guestId && room.hostId !== playerId) {
         room.guestId = playerId;
         room.guestSeenAt = Date.now();
+        isGuest = true;
       } else {
         return NextResponse.json({ error: "Not in room" }, { status: 403 });
       }
@@ -91,9 +107,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }
 
     const turn = chess.turn();
-    const actingHost = playerId === room.hostId;
-    const actingGuest = playerId === room.guestId;
-    if ((turn === "w" && !actingHost) || (turn === "b" && !actingGuest)) {
+    if ((turn === "w" && !isHost) || (turn === "b" && !isGuest)) {
       return NextResponse.json({ error: "Not your turn" }, { status: 400 });
     }
 
@@ -110,6 +124,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     room.fen = chess.fen();
     room.history = [...room.history, move.san];
     room.lastMove = { from: move.from, to: move.to };
+    room.gameSeq = (room.gameSeq ?? 0) + 1;
 
     if (chess.isCheckmate()) {
       room.status = "Checkmate!";
@@ -129,8 +144,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       room.status = turn === "w" ? "Black to move" : "White to move";
     }
 
-    if (actingHost) room.hostSeenAt = Date.now();
-    if (actingGuest) room.guestSeenAt = Date.now();
+    if (isHost) room.hostSeenAt = Date.now();
+    if (isGuest) room.guestSeenAt = Date.now();
 
     await saveRoom(room);
     return NextResponse.json(publicRoom(room, playerId));
@@ -144,6 +159,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     room.history = [];
     room.lastMove = null;
     room.gameOver = false;
+    room.gameSeq = (room.gameSeq ?? 0) + 1;
     room.status = room.guestId
       ? "New game. White to move."
       : "Waiting for opponent…";

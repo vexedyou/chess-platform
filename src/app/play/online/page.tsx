@@ -27,6 +27,7 @@ type PublicRoom = {
   lastMove: { from: string; to: string } | null;
   status: string;
   gameOver: boolean;
+  gameSeq?: number;
   playerCount: number;
   yourColor: "w" | "b" | null;
   updatedAt: number;
@@ -39,8 +40,8 @@ function OnlinePlayInner() {
 
   const [phase, setPhase] = useState<Phase>("lobby");
   const [roomCode, setRoomCode] = useState(roomFromUrl?.toUpperCase() || "");
-  const [joinInput, setJoinInput] = useState("");
   const [role, setRole] = useState<"host" | "guest" | null>(null);
+  const [joinInput, setJoinInput] = useState("");
   const [yourColor, setYourColor] = useState<"w" | "b" | null>(null);
   const [connected, setConnected] = useState(false);
   const [game, setGame] = useState<GameState>(emptyGame());
@@ -56,15 +57,20 @@ function OnlinePlayInner() {
 
   const playerIdRef = useRef("");
   const roleRef = useRef<"host" | "guest" | null>(null);
+  const gameRef = useRef<GameState>(emptyGame());
+  const gameSeqRef = useRef(0);
   const prevHistoryLen = useRef(0);
   const bootstrapped = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastUpdatedRef = useRef(0);
   const boardWidth = useBoardWidth(720);
 
   useEffect(() => {
     playerIdRef.current = makePlayerId();
   }, []);
+
+  useEffect(() => {
+    gameRef.current = game;
+  }, [game]);
 
   useEffect(() => {
     const len = game.history.length;
@@ -107,29 +113,60 @@ function OnlinePlayInner() {
 
   useEffect(() => () => stopPoll(), [stopPoll]);
 
-  const applyRoom = useCallback((data: PublicRoom) => {
-    // Accept equal timestamps so presence refreshes still update playerCount
-    if (data.updatedAt < lastUpdatedRef.current) return;
-    lastUpdatedRef.current = data.updatedAt;
-    setGame({
-      fen: data.fen,
-      history: data.history,
-      lastMove: data.lastMove,
-      status: data.status,
-      gameOver: data.gameOver,
-    });
+  /**
+   * Apply server room data without ever rewinding the board mid-game.
+   * Presence (playerCount) always updates; fen/history only advance with gameSeq.
+   */
+  const applyRoom = useCallback((data: PublicRoom, opts?: { force?: boolean }) => {
     if (data.yourColor) setYourColor(data.yourColor);
     setConnected(data.playerCount >= 2);
     setRoomCode(data.code);
     setPhase("playing");
     setError("");
+
+    const remoteSeq = data.gameSeq ?? data.history?.length ?? 0;
+    const localSeq = gameSeqRef.current;
+    const localLen = gameRef.current.history.length;
+    const remoteLen = data.history?.length ?? 0;
+
+    // Explicit force (reset response) or strictly newer game version
+    const isReset =
+      remoteSeq > localSeq &&
+      remoteLen === 0 &&
+      (data.status.includes("New game") ||
+        data.status.includes("White to move") ||
+        data.status.startsWith("Waiting"));
+
+    const shouldApplyGame =
+      opts?.force ||
+      remoteSeq > localSeq ||
+      (remoteSeq === localSeq && remoteLen >= localLen);
+
+    // Hard guard: never apply a shorter history unless it's a versioned reset
+    if (!opts?.force && remoteLen < localLen && !isReset) {
+      return;
+    }
+
+    if (!shouldApplyGame && !isReset) {
+      return;
+    }
+
+    gameSeqRef.current = Math.max(localSeq, remoteSeq);
+    const next: GameState = {
+      fen: data.fen,
+      history: data.history,
+      lastMove: data.lastMove,
+      status: data.status,
+      gameOver: data.gameOver,
+    };
+    gameRef.current = next;
+    setGame(next);
   }, []);
 
   const pollOnce = useCallback(
     async (code: string, r: "host" | "guest") => {
       const pid = playerIdRef.current || makePlayerId();
       try {
-        // Presence + state
         const res = await fetch(`/api/rooms/${code}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -139,14 +176,17 @@ function OnlinePlayInner() {
           applyRoom((await res.json()) as PublicRoom);
           return;
         }
-        // Fallback GET
+        if (res.status === 404) {
+          // Room lost on this instance — keep local board, don't wipe
+          return;
+        }
         const g = await fetch(
           `/api/rooms/${code}?playerId=${encodeURIComponent(pid)}&role=${r}`,
           { cache: "no-store" }
         );
         if (g.ok) applyRoom((await g.json()) as PublicRoom);
       } catch {
-        /* */
+        /* keep local state */
       }
     },
     [applyRoom]
@@ -160,6 +200,7 @@ function OnlinePlayInner() {
     }, 700);
   }
 
+  /** Host creates a brand-new room. */
   const startHost = useCallback(async () => {
     stopPoll();
     setPhase("connecting");
@@ -167,7 +208,7 @@ function OnlinePlayInner() {
     setError("");
     setBanner(null);
     setViewIndex(-1);
-    lastUpdatedRef.current = 0;
+    gameSeqRef.current = 0;
     prevHistoryLen.current = 0;
     roleRef.current = "host";
     setRole("host");
@@ -186,7 +227,7 @@ function OnlinePlayInner() {
       } catch {
         /* */
       }
-      applyRoom(data);
+      applyRoom(data, { force: true });
       setYourColor("w");
       bootstrapped.current = true;
       router.replace("/play/online?room=" + data.code);
@@ -196,6 +237,49 @@ function OnlinePlayInner() {
       setPhase("lobby");
     }
   }, [applyRoom, router, stopPoll]);
+
+  /** Re-attach to an existing room (refresh / open link) without creating a new one. */
+  const rejoinRoom = useCallback(
+    async (code: string, r: "host" | "guest") => {
+      stopPoll();
+      setPhase("connecting");
+      setStatusLine("Reconnecting…");
+      setError("");
+      roleRef.current = r;
+      setRole(r);
+
+      const pid = playerIdRef.current || makePlayerId();
+      try {
+        let data: PublicRoom | null = null;
+        for (let i = 0; i < 12; i++) {
+          const res = await fetch(`/api/rooms/${code}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: r === "host" ? "rejoin" : "join",
+              playerId: pid,
+              role: r,
+            }),
+          });
+          if (res.ok) {
+            data = (await res.json()) as PublicRoom;
+            break;
+          }
+          await new Promise((x) => setTimeout(x, 400));
+        }
+        if (!data) throw new Error("Room not found");
+        applyRoom(data, { force: true });
+        if (data.yourColor) setYourColor(data.yourColor);
+        else setYourColor(r === "host" ? "w" : "b");
+        bootstrapped.current = true;
+        startPolling(code, r);
+      } catch {
+        setError("Could not reconnect to room.");
+        setPhase("lobby");
+      }
+    },
+    [applyRoom, stopPoll]
+  );
 
   const startGuest = useCallback(
     async (codeRaw: string) => {
@@ -210,7 +294,7 @@ function OnlinePlayInner() {
       setError("");
       setBanner(null);
       setViewIndex(-1);
-      lastUpdatedRef.current = 0;
+      gameSeqRef.current = 0;
       prevHistoryLen.current = 0;
       roleRef.current = "guest";
       setRole("guest");
@@ -236,7 +320,7 @@ function OnlinePlayInner() {
         }
         if (!data) throw new Error(lastErr);
 
-        applyRoom(data);
+        applyRoom(data, { force: true });
         setYourColor(data.yourColor || "b");
         bootstrapped.current = true;
         router.replace("/play/online?room=" + data.code);
@@ -259,7 +343,8 @@ function OnlinePlayInner() {
     } catch {
       /* */
     }
-    if (isHost) void startHost();
+    // Rejoin existing room — never create a second room on refresh
+    if (isHost) void rejoinRoom(code, "host");
     else void startGuest(code);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomFromUrl]);
@@ -276,7 +361,6 @@ function OnlinePlayInner() {
     const mover = chess.turn() === "w" ? "b" : "w";
     if (mover !== yourColor) return;
 
-    // Optimistic UI
     const optimistic: GameState = {
       fen: newFen,
       history: [...game.history, move.san],
@@ -290,6 +374,9 @@ function OnlinePlayInner() {
             : "Opponent's turn",
       gameOver: chess.isGameOver(),
     };
+    // Optimistic seq so presence can't rewind before server confirms
+    gameSeqRef.current += 1;
+    gameRef.current = optimistic;
     setGame(optimistic);
     setViewIndex(-1);
 
@@ -307,16 +394,10 @@ function OnlinePlayInner() {
         }),
       });
       if (res.ok) {
-        const data = (await res.json()) as PublicRoom;
-        applyRoom(data);
-      } else {
-        // Re-sync
-        const r = roleRef.current;
-        if (r) void pollOnce(roomCode, r);
+        applyRoom((await res.json()) as PublicRoom, { force: true });
       }
     } catch {
-      const r = roleRef.current;
-      if (r) void pollOnce(roomCode, r);
+      /* keep optimistic; next successful poll/move will resync */
     }
   }
 
@@ -332,7 +413,7 @@ function OnlinePlayInner() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "reset", playerId: pid }),
       });
-      if (res.ok) applyRoom((await res.json()) as PublicRoom);
+      if (res.ok) applyRoom((await res.json()) as PublicRoom, { force: true });
     } catch {
       /* */
     }
@@ -356,17 +437,18 @@ function OnlinePlayInner() {
     stopPoll();
     roleRef.current = null;
     bootstrapped.current = false;
+    gameSeqRef.current = 0;
     setPhase("lobby");
     setRole(null);
     setYourColor(null);
     setRoomCode("");
     setGame(emptyGame());
+    gameRef.current = emptyGame();
     setError("");
     setStatusLine("");
     setBanner(null);
     setViewIndex(-1);
     setConnected(false);
-    lastUpdatedRef.current = 0;
     router.replace("/play/online");
   }
 
