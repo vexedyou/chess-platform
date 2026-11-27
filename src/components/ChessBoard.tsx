@@ -29,17 +29,16 @@ export default function ChessBoard({
 }: ChessBoardProps) {
   const safeWidth = Math.max(280, Math.floor(boardWidth || 480));
 
-  // Keep a mutable chess instance that mirrors the fen prop
   const chessRef = useRef<Chess>(new Chess(fen || undefined));
   const [position, setPosition] = useState(fen || chessRef.current.fen());
   const [moveFrom, setMoveFrom] = useState<Square | null>(null);
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
   >({});
-  // Force board remount when interactivity toggles (react-dnd can stick)
   const [boardKey, setBoardKey] = useState(0);
+  const interactiveRef = useRef(interactive);
+  interactiveRef.current = interactive;
 
-  // Sync external fen → local board
   useEffect(() => {
     if (!fen) return;
     try {
@@ -50,11 +49,10 @@ export default function ChessBoard({
         setOptionSquares({});
       }
     } catch {
-      /* ignore invalid fen */
+      /* ignore */
     }
   }, [fen]);
 
-  // Remount when interactive flips so drag handlers rebind cleanly
   useEffect(() => {
     setBoardKey((k) => k + 1);
     setMoveFrom(null);
@@ -68,7 +66,7 @@ export default function ChessBoard({
 
   function showMovesFrom(square: Square) {
     const game = chessRef.current;
-    const moves = game.moves({ square, verbose: true }) as Move[];
+    const moves = game.moves({ square, verbose: true });
     if (!moves.length) {
       clearSelection();
       return false;
@@ -91,11 +89,11 @@ export default function ChessBoard({
   }
 
   function applyMove(from: Square, to: Square): boolean {
-    if (!interactive) return false;
+    if (!interactiveRef.current) return false;
     const game = chessRef.current;
     let result: Move | null = null;
     try {
-      result = game.move({ from, to, promotion: "q" }) as Move | null;
+      result = game.move({ from, to, promotion: "q" });
     } catch {
       result = null;
     }
@@ -106,11 +104,11 @@ export default function ChessBoard({
     clearSelection();
     onMove?.(result, newFen);
 
-    if (game.game_over()) {
+    if (game.isGameOver()) {
       let outcome = "draw";
-      if (game.in_checkmate()) {
+      if (game.isCheckmate()) {
         outcome = game.turn() === "w" ? "black" : "white";
-      } else if (game.in_stalemate()) {
+      } else if (game.isStalemate()) {
         outcome = "stalemate";
       }
       onGameOver?.(outcome);
@@ -119,10 +117,9 @@ export default function ChessBoard({
   }
 
   function onSquareClick(square: Square) {
-    if (!interactive) return;
+    if (!interactiveRef.current) return;
     const game = chessRef.current;
 
-    // First click — select piece
     if (!moveFrom) {
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
@@ -131,16 +128,13 @@ export default function ChessBoard({
       return;
     }
 
-    // Click same square — deselect
     if (moveFrom === square) {
       clearSelection();
       return;
     }
 
-    // Try move
     const moved = applyMove(moveFrom, square);
     if (!moved) {
-      // Select different piece of side to move
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
         showMovesFrom(square);
@@ -151,7 +145,7 @@ export default function ChessBoard({
   }
 
   function onPieceDragBegin(_piece: string, sourceSquare: Square) {
-    if (!interactive) return;
+    if (!interactiveRef.current) return;
     const game = chessRef.current;
     const piece = game.get(sourceSquare);
     if (piece && piece.color === game.turn()) {
@@ -160,7 +154,7 @@ export default function ChessBoard({
   }
 
   function onPieceDrop(sourceSquare: string, targetSquare: string) {
-    if (!interactive) return false;
+    if (!interactiveRef.current) return false;
     const ok = applyMove(sourceSquare as Square, targetSquare as Square);
     if (!ok) clearSelection();
     return ok;
@@ -187,19 +181,21 @@ export default function ChessBoard({
     return s;
   }, [optionSquares, customSquareStyles, lastMove, highlightSquares]);
 
-  const turn = chessRef.current.turn();
+  // Recompute turn for isDraggablePiece when position changes
+  const turn = position.split(" ")[1] === "b" ? "b" : "w";
 
   return (
     <div
-      className="rounded-lg overflow-hidden shadow-2xl"
       style={{
         border: "1px solid var(--border)",
+        borderRadius: 8,
         width: safeWidth,
         maxWidth: "100%",
-        // Ensure the board captures pointer events
         pointerEvents: "auto",
         position: "relative",
         zIndex: 1,
+        overflow: "hidden",
+        boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)",
       }}
     >
       <Chessboard
@@ -212,10 +208,8 @@ export default function ChessBoard({
         customSquareStyles={styles}
         boardOrientation={orientation}
         boardWidth={safeWidth}
-        arePiecesDraggable={interactive}
-        isDraggablePiece={({ piece }) =>
-          interactive && piece[0] === turn
-        }
+        arePiecesDraggable={!!interactive}
+        isDraggablePiece={({ piece }) => !!interactive && piece[0] === turn}
         customDarkSquareStyle={{ backgroundColor: "#779556" }}
         customLightSquareStyle={{ backgroundColor: "#ebecd0" }}
         customBoardStyle={{ borderRadius: "4px" }}
