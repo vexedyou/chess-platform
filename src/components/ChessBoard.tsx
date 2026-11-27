@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Chess, Move, Square } from "chess.js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Chess, type Move, type Square } from "chess.js";
 import { Chessboard } from "react-chessboard";
 
 interface ChessBoardProps {
@@ -27,137 +27,142 @@ export default function ChessBoard({
   boardWidth = 480,
   customSquareStyles = {},
 }: ChessBoardProps) {
-  const [game, setGame] = useState(() => {
-    try {
-      return new Chess(fen);
-    } catch {
-      return new Chess();
-    }
-  });
+  const safeWidth = Math.max(280, Math.floor(boardWidth || 480));
+
+  // Keep a mutable chess instance that mirrors the fen prop
+  const chessRef = useRef<Chess>(new Chess(fen || undefined));
+  const [position, setPosition] = useState(fen || chessRef.current.fen());
   const [moveFrom, setMoveFrom] = useState<Square | null>(null);
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
   >({});
+  // Force board remount when interactivity toggles (react-dnd can stick)
+  const [boardKey, setBoardKey] = useState(0);
 
+  // Sync external fen → local board
   useEffect(() => {
     if (!fen) return;
     try {
-      if (fen !== game.fen()) {
-        setGame(new Chess(fen));
+      if (fen !== chessRef.current.fen()) {
+        chessRef.current = new Chess(fen);
+        setPosition(fen);
         setMoveFrom(null);
         setOptionSquares({});
       }
     } catch {
-      // ignore invalid fen
+      /* ignore invalid fen */
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fen]);
 
-  const checkGameOver = useCallback(
-    (g: Chess) => {
-      if (!g.isGameOver()) return;
-      let result = "draw";
-      if (g.isCheckmate()) {
-        result = g.turn() === "w" ? "black" : "white";
-      } else if (g.isStalemate()) {
-        result = "stalemate";
-      } else if (g.isThreefoldRepetition()) {
-        result = "repetition";
-      } else if (g.isInsufficientMaterial()) {
-        result = "insufficient";
-      } else if (g.isDraw()) {
-        result = "draw";
-      }
-      onGameOver?.(result);
-    },
-    [onGameOver]
-  );
+  // Remount when interactive flips so drag handlers rebind cleanly
+  useEffect(() => {
+    setBoardKey((k) => k + 1);
+    setMoveFrom(null);
+    setOptionSquares({});
+  }, [interactive]);
 
-  function getMoveOptions(square: Square) {
-    const moves = game.moves({ square, verbose: true });
-    if (moves.length === 0) {
-      setOptionSquares({});
+  function clearSelection() {
+    setMoveFrom(null);
+    setOptionSquares({});
+  }
+
+  function showMovesFrom(square: Square) {
+    const game = chessRef.current;
+    const moves = game.moves({ square, verbose: true }) as Move[];
+    if (!moves.length) {
+      clearSelection();
       return false;
     }
-    const newSquares: Record<string, React.CSSProperties> = {};
+    const styles: Record<string, React.CSSProperties> = {};
     for (const m of moves) {
       const target = game.get(m.to as Square);
-      newSquares[m.to] = {
+      styles[m.to] = {
         background:
           target && target.color !== game.get(square)?.color
-            ? "radial-gradient(circle, rgba(0,0,0,.12) 85%, transparent 85%)"
-            : "radial-gradient(circle, rgba(0,0,0,.12) 25%, transparent 25%)",
+            ? "radial-gradient(circle, rgba(0,0,0,.18) 85%, transparent 85%)"
+            : "radial-gradient(circle, rgba(0,0,0,.18) 25%, transparent 25%)",
         borderRadius: "50%",
       };
     }
-    newSquares[square] = { background: "rgba(255, 255, 0, 0.4)" };
-    setOptionSquares(newSquares);
+    styles[square] = { background: "rgba(255, 255, 0, 0.45)" };
+    setOptionSquares(styles);
+    setMoveFrom(square);
     return true;
   }
 
-  function tryMove(from: Square, to: Square): boolean {
+  function applyMove(from: Square, to: Square): boolean {
     if (!interactive) return false;
+    const game = chessRef.current;
+    let result: Move | null = null;
     try {
-      const copy = new Chess(game.fen());
-      const result = copy.move({ from, to, promotion: "q" });
-      if (!result) return false;
-      setGame(copy);
-      setMoveFrom(null);
-      setOptionSquares({});
-      onMove?.(result, copy.fen());
-      checkGameOver(copy);
-      return true;
+      result = game.move({ from, to, promotion: "q" }) as Move | null;
     } catch {
-      return false;
+      result = null;
     }
+    if (!result) return false;
+
+    const newFen = game.fen();
+    setPosition(newFen);
+    clearSelection();
+    onMove?.(result, newFen);
+
+    if (game.game_over()) {
+      let outcome = "draw";
+      if (game.in_checkmate()) {
+        outcome = game.turn() === "w" ? "black" : "white";
+      } else if (game.in_stalemate()) {
+        outcome = "stalemate";
+      }
+      onGameOver?.(outcome);
+    }
+    return true;
   }
 
   function onSquareClick(square: Square) {
     if (!interactive) return;
+    const game = chessRef.current;
 
+    // First click — select piece
     if (!moveFrom) {
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
-        if (getMoveOptions(square)) setMoveFrom(square);
+        showMovesFrom(square);
       }
       return;
     }
 
+    // Click same square — deselect
     if (moveFrom === square) {
-      setMoveFrom(null);
-      setOptionSquares({});
+      clearSelection();
       return;
     }
 
-    const moved = tryMove(moveFrom, square);
+    // Try move
+    const moved = applyMove(moveFrom, square);
     if (!moved) {
+      // Select different piece of side to move
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
-        getMoveOptions(square);
-        setMoveFrom(square);
+        showMovesFrom(square);
       } else {
-        setMoveFrom(null);
-        setOptionSquares({});
+        clearSelection();
       }
     }
   }
 
   function onPieceDragBegin(_piece: string, sourceSquare: Square) {
     if (!interactive) return;
+    const game = chessRef.current;
     const piece = game.get(sourceSquare);
     if (piece && piece.color === game.turn()) {
-      getMoveOptions(sourceSquare);
-      setMoveFrom(sourceSquare);
+      showMovesFrom(sourceSquare);
     }
   }
 
-  function onPieceDrop(sourceSquare: Square, targetSquare: Square) {
+  function onPieceDrop(sourceSquare: string, targetSquare: string) {
     if (!interactive) return false;
-    const ok = tryMove(sourceSquare, targetSquare);
-    if (!ok) {
-      setMoveFrom(null);
-      setOptionSquares({});
-    }
+    const ok = applyMove(sourceSquare as Square, targetSquare as Square);
+    if (!ok) clearSelection();
     return ok;
   }
 
@@ -182,27 +187,39 @@ export default function ChessBoard({
     return s;
   }, [optionSquares, customSquareStyles, lastMove, highlightSquares]);
 
+  const turn = chessRef.current.turn();
+
   return (
     <div
       className="rounded-lg overflow-hidden shadow-2xl"
-      style={{ border: "1px solid var(--border)" }}
+      style={{
+        border: "1px solid var(--border)",
+        width: safeWidth,
+        maxWidth: "100%",
+        // Ensure the board captures pointer events
+        pointerEvents: "auto",
+        position: "relative",
+        zIndex: 1,
+      }}
     >
       <Chessboard
-        position={game.fen()}
+        key={`board-${boardKey}-${safeWidth}`}
+        id="pushing-pawns-board"
+        position={position}
         onSquareClick={onSquareClick}
         onPieceDrop={onPieceDrop}
         onPieceDragBegin={onPieceDragBegin}
         customSquareStyles={styles}
         boardOrientation={orientation}
-        boardWidth={boardWidth}
+        boardWidth={safeWidth}
         arePiecesDraggable={interactive}
         isDraggablePiece={({ piece }) =>
-          interactive && piece[0] === game.turn()
+          interactive && piece[0] === turn
         }
         customDarkSquareStyle={{ backgroundColor: "#779556" }}
         customLightSquareStyle={{ backgroundColor: "#ebecd0" }}
         customBoardStyle={{ borderRadius: "4px" }}
-        animationDuration={150}
+        animationDuration={120}
       />
     </div>
   );
