@@ -1,9 +1,9 @@
 /**
- * Durable room store backed by Vercel Blob (shared across all serverless instances).
- * Falls back to in-memory when BLOB_READ_WRITE_TOKEN is missing (local dev).
+ * Durable room store (Vercel Blob).
+ * Presence updates NEVER overwrite a newer gameSeq / longer history.
  */
 
-import { put, head, list } from "@vercel/blob";
+import { put, list } from "@vercel/blob";
 
 export type Room = {
   code: string;
@@ -48,76 +48,104 @@ function pathFor(code: string): string {
   return `rooms/${code.toUpperCase()}.json`;
 }
 
+function normalize(room: Room): Room {
+  if (typeof room.gameSeq !== "number") {
+    room.gameSeq = room.history?.length ?? 0;
+  }
+  if (!Array.isArray(room.history)) room.history = [];
+  return room;
+}
+
+/** Prefer the version with higher gameSeq, then longer history. */
+function preferNewer(a: Room, b: Room): Room {
+  if (b.gameSeq > a.gameSeq) return b;
+  if (a.gameSeq > b.gameSeq) return a;
+  if ((b.history?.length ?? 0) > (a.history?.length ?? 0)) return b;
+  return a;
+}
+
 async function blobGet(code: string): Promise<Room | null> {
   const key = code.toUpperCase();
-  if (!hasBlob()) return mem().get(key) ?? null;
+  const cached = mem().get(key);
+
+  if (!hasBlob()) return cached ? structuredClone(cached) : null;
 
   try {
-    // Prefer cached URL from last write
     let url = urlCache().get(key);
 
     if (!url) {
-      const listed = await list({
-        prefix: pathFor(key),
-        limit: 1,
-      });
+      const listed = await list({ prefix: pathFor(key), limit: 1 });
       if (listed.blobs.length === 0) {
-        return mem().get(key) ?? null;
+        return cached ? structuredClone(cached) : null;
       }
       url = listed.blobs[0].url;
       urlCache().set(key, url);
     }
 
-    // Fetch with token so private blobs are readable; bust CDN with query
-    const res = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
-      headers: {
-        Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-      },
-      cache: "no-store",
-    });
+    // Public blob + cache bust (no auth header needed when access=public)
+    const res = await fetch(
+      `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`,
+      { cache: "no-store" }
+    );
 
     if (!res.ok) {
-      // URL may be stale — re-list
       urlCache().delete(key);
       const listed = await list({ prefix: pathFor(key), limit: 1 });
-      if (listed.blobs.length === 0) return mem().get(key) ?? null;
+      if (listed.blobs.length === 0) {
+        return cached ? structuredClone(cached) : null;
+      }
       url = listed.blobs[0].url;
       urlCache().set(key, url);
       const retry = await fetch(
         `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`,
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-          },
-          cache: "no-store",
-        }
+        { cache: "no-store" }
       );
-      if (!retry.ok) return mem().get(key) ?? null;
-      const room = (await retry.json()) as Room;
-      if (typeof room.gameSeq !== "number") room.gameSeq = room.history?.length ?? 0;
-      mem().set(key, room);
-      return room;
+      if (!retry.ok) return cached ? structuredClone(cached) : null;
+      const room = normalize((await retry.json()) as Room);
+      // Merge with in-memory if memory is newer (same-instance race)
+      const best = cached ? preferNewer(cached, room) : room;
+      mem().set(key, best);
+      return structuredClone(best);
     }
 
-    const room = (await res.json()) as Room;
-    if (typeof room.gameSeq !== "number") room.gameSeq = room.history?.length ?? 0;
-    mem().set(key, room);
-    return room;
-  } catch {
-    return mem().get(key) ?? null;
+    const room = normalize((await res.json()) as Room);
+    const best = cached ? preferNewer(cached, room) : room;
+    mem().set(key, best);
+    return structuredClone(best);
+  } catch (e) {
+    console.error("[rooms] blobGet", e);
+    return cached ? structuredClone(cached) : null;
   }
 }
 
 async function blobSet(room: Room): Promise<void> {
   const key = room.code.toUpperCase();
   room.code = key;
-  mem().set(key, room);
+  normalize(room);
+
+  // Never let a write go backwards vs in-memory
+  const existing = mem().get(key);
+  if (existing) {
+    const best = preferNewer(existing, room);
+    if (best !== room && best.gameSeq > room.gameSeq) {
+      // Keep newer game fields; still allow presence timestamps on room
+      room.fen = best.fen;
+      room.history = best.history;
+      room.lastMove = best.lastMove;
+      room.status = best.status;
+      room.gameOver = best.gameOver;
+      room.gameSeq = best.gameSeq;
+    }
+  }
+
+  room.updatedAt = Date.now();
+  mem().set(key, structuredClone(room));
 
   if (!hasBlob()) return;
 
   try {
     const result = await put(pathFor(key), JSON.stringify(room), {
-      access: "private",
+      access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
@@ -125,7 +153,7 @@ async function blobSet(room: Room): Promise<void> {
     });
     urlCache().set(key, result.url);
   } catch (e) {
-    console.error("blobSet failed", e);
+    console.error("[rooms] blobSet failed", e);
   }
 }
 
@@ -167,52 +195,74 @@ export async function getRoom(code: string): Promise<Room | null> {
 }
 
 export async function saveRoom(room: Room): Promise<void> {
-  room.updatedAt = Date.now();
+  // Re-read so we don't clobber a concurrent newer move
+  const latest = await blobGet(room.code);
+  if (latest && latest.gameSeq > room.gameSeq) {
+    // Newer game already stored — only refresh presence on top of it
+    latest.hostSeenAt = Math.max(latest.hostSeenAt, room.hostSeenAt);
+    latest.guestSeenAt = Math.max(latest.guestSeenAt, room.guestSeenAt);
+    if (room.guestId && !latest.guestId) latest.guestId = room.guestId;
+    await blobSet(latest);
+    // Copy back so caller sees truth
+    Object.assign(room, latest);
+    return;
+  }
   await blobSet(room);
 }
 
-/** Presence only — never creates rooms, never rewinds game state. */
+/**
+ * Presence only. Never rewinds fen/history/gameSeq.
+ * Re-reads before write and merges onto the newest game version.
+ */
 export async function touchPresence(
   code: string,
   playerId: string,
   role: "host" | "guest"
 ): Promise<Room | null> {
-  const room = await blobGet(code);
-  if (!room) return null;
+  const base = await blobGet(code);
+  if (!base) return null;
 
   const now = Date.now();
+  let hostId = base.hostId;
+  let guestId = base.guestId;
+  let hostSeenAt = base.hostSeenAt;
+  let guestSeenAt = base.guestSeenAt;
 
   if (role === "host") {
-    if (room.hostId === "unknown" || room.hostId === playerId) {
-      room.hostId = playerId;
-    }
-    if (room.hostId === playerId) room.hostSeenAt = now;
+    if (hostId === "unknown" || hostId === playerId) hostId = playerId;
+    if (hostId === playerId) hostSeenAt = now;
   } else {
-    if (room.hostId === playerId) {
-      room.hostSeenAt = now;
+    if (hostId === playerId) {
+      hostSeenAt = now;
     } else {
-      if (!room.guestId || room.guestId === playerId) {
-        room.guestId = playerId;
-      }
-      if (room.guestId === playerId) room.guestSeenAt = now;
+      if (!guestId || guestId === playerId) guestId = playerId;
+      if (guestId === playerId) guestSeenAt = now;
     }
   }
 
-  const guestFresh = !!(room.guestId && now - room.guestSeenAt < 15000);
+  // Critical: re-fetch so a concurrent move is not lost
+  const latest = (await blobGet(code)) ?? base;
+
+  latest.hostId = hostId || latest.hostId;
+  if (guestId) latest.guestId = guestId;
+  latest.hostSeenAt = Math.max(latest.hostSeenAt, hostSeenAt);
+  latest.guestSeenAt = Math.max(latest.guestSeenAt, guestSeenAt);
+
+  const guestFresh = !!(latest.guestId && now - latest.guestSeenAt < 15000);
   const hostFresh =
-    room.hostId !== "unknown" && now - room.hostSeenAt < 15000;
-  if (guestFresh && hostFresh && !room.gameOver) {
+    latest.hostId !== "unknown" && now - latest.hostSeenAt < 15000;
+  if (guestFresh && hostFresh && !latest.gameOver) {
     if (
-      room.history.length === 0 &&
-      (room.status.startsWith("Waiting") || room.status.includes("host"))
+      latest.history.length === 0 &&
+      (latest.status.startsWith("Waiting") || latest.status.includes("host"))
     ) {
-      room.status = "Both connected. White to move.";
+      latest.status = "Both connected. White to move.";
     }
   }
 
-  room.updatedAt = now;
-  await blobSet(room);
-  return room;
+  // Do not bump gameSeq for presence
+  await blobSet(latest);
+  return latest;
 }
 
 export function publicRoom(room: Room, playerId: string) {
@@ -238,6 +288,3 @@ export function publicRoom(room: Room, playerId: string) {
     updatedAt: room.updatedAt,
   };
 }
-
-// silence unused import warning if head is tree-shaken differently
-void head;

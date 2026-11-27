@@ -13,21 +13,14 @@ export const runtime = "nodejs";
 
 type Ctx = { params: Promise<{ code: string }> };
 
+/** Read-only poll (no write). Use for frequent game-state sync. */
 export async function GET(req: NextRequest, ctx: Ctx) {
   const { code } = await ctx.params;
   const playerId = req.nextUrl.searchParams.get("playerId") || "";
-  const roleParam = req.nextUrl.searchParams.get("role");
-  const role =
-    roleParam === "host" || roleParam === "guest" ? roleParam : null;
 
-  let room = await getRoom(code);
+  const room = await getRoom(code);
   if (!room) {
     return NextResponse.json({ error: "Room not found" }, { status: 404 });
-  }
-
-  if (playerId && role) {
-    const touched = await touchPresence(code, playerId, role);
-    if (touched) room = touched;
   }
 
   return NextResponse.json(publicRoom(room, playerId));
@@ -43,7 +36,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   }
 
   if (action === "join") {
-    // Never soft-create — guest must join a room the host already created
     const room = await touchPresence(code, playerId, "guest");
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -60,7 +52,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     return NextResponse.json(publicRoom(room, playerId));
   }
 
-  // Host re-attach after refresh (same code, claim host seat without new room)
   if (action === "rejoin") {
     const role = body.role === "guest" ? "guest" : "host";
     const room = await touchPresence(code, playerId, role);
@@ -82,6 +73,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!from || !to) {
       return NextResponse.json({ error: "from/to required" }, { status: 400 });
     }
+
+    // Re-load right before applying so we have latest history
+    room = (await getRoom(code)) ?? room;
 
     let isHost = playerId === room.hostId;
     let isGuest = playerId === room.guestId;
@@ -148,7 +142,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (isGuest) room.guestSeenAt = Date.now();
 
     await saveRoom(room);
-    return NextResponse.json(publicRoom(room, playerId));
+    // Return whatever is actually stored (after merge)
+    const confirmed = (await getRoom(code)) ?? room;
+    return NextResponse.json(publicRoom(confirmed, playerId));
   }
 
   if (action === "reset") {
@@ -164,7 +160,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       ? "New game. White to move."
       : "Waiting for opponent…";
     await saveRoom(room);
-    return NextResponse.json(publicRoom(room, playerId));
+    const confirmed = (await getRoom(code)) ?? room;
+    return NextResponse.json(publicRoom(confirmed, playerId));
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
