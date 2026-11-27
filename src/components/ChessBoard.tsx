@@ -16,6 +16,14 @@ interface ChessBoardProps {
   customSquareStyles?: Record<string, React.CSSProperties>;
 }
 
+function isPromotionMove(game: Chess, from: string, to: string): boolean {
+  const piece = game.get(from as Square);
+  if (!piece || piece.type !== "p") return false;
+  if (piece.color === "w" && to[1] === "8") return true;
+  if (piece.color === "b" && to[1] === "1") return true;
+  return false;
+}
+
 export default function ChessBoard({
   fen,
   orientation = "white",
@@ -46,7 +54,6 @@ export default function ChessBoard({
     Record<string, React.CSSProperties>
   >({});
 
-  // Keep board in sync with parent fen
   useEffect(() => {
     if (!fen) return;
     try {
@@ -87,7 +94,6 @@ export default function ChessBoard({
     setRightClicked({});
     if (!interactive) return;
 
-    // No piece selected yet
     if (!moveFrom) {
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
@@ -97,14 +103,12 @@ export default function ChessBoard({
       return;
     }
 
-    // Clicking the same square deselects
     if (moveFrom === square) {
       setMoveFrom(null);
       setOptionSquares({});
       return;
     }
 
-    // Attempt the move
     const moves = game.moves({
       square: moveFrom as Square,
       verbose: true,
@@ -112,7 +116,6 @@ export default function ChessBoard({
     const found = moves.find((m) => m.from === moveFrom && m.to === square);
 
     if (!found) {
-      // Select another piece
       const piece = game.get(square);
       if (piece && piece.color === game.turn()) {
         setMoveFrom(square);
@@ -124,11 +127,7 @@ export default function ChessBoard({
       return;
     }
 
-    // Promotion?
-    if (
-      (found.color === "w" && found.piece === "p" && square[1] === "8") ||
-      (found.color === "b" && found.piece === "p" && square[1] === "1")
-    ) {
+    if (isPromotionMove(game, moveFrom, square)) {
       setMoveTo(square);
       setShowPromotion(true);
       return;
@@ -174,10 +173,21 @@ export default function ChessBoard({
 
   function onPieceDrop(sourceSquare: string, targetSquare: string) {
     if (!interactive) return false;
+
+    // Show promotion picker instead of auto-queening
+    if (isPromotionMove(game, sourceSquare, targetSquare)) {
+      const legal = game.moves({ square: sourceSquare as Square, verbose: true });
+      if (!legal.some((m) => m.to === targetSquare)) return false;
+      setMoveFrom(sourceSquare);
+      setMoveTo(targetSquare);
+      setShowPromotion(true);
+      setOptionSquares({});
+      return false; // don't complete the drop yet
+    }
+
     return makeMove(sourceSquare, targetSquare, "q");
   }
 
-  // Build square styles
   const styles: Record<string, React.CSSProperties> = {
     ...optionSquares,
     ...rightClicked,

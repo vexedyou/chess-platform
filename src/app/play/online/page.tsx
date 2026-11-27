@@ -55,6 +55,7 @@ function OnlinePlayInner() {
   } | null>(null);
 
   const playerIdRef = useRef("");
+  const roleRef = useRef<"host" | "guest" | null>(null);
   const gameRef = useRef<GameState>(emptyGame());
   const gameSeqRef = useRef(0);
   const prevHistoryLen = useRef(0);
@@ -63,8 +64,13 @@ function OnlinePlayInner() {
   const presenceRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const boardWidth = useBoardWidth(720);
 
-  useEffect(() => {
+  // Stable player id before any click (not only in useEffect)
+  if (typeof window !== "undefined" && !playerIdRef.current) {
     playerIdRef.current = makePlayerId();
+  }
+
+  useEffect(() => {
+    if (!playerIdRef.current) playerIdRef.current = makePlayerId();
   }, []);
 
   useEffect(() => {
@@ -79,6 +85,8 @@ function OnlinePlayInner() {
         if (game.status.toLowerCase().includes("check")) playGameSound({ check: true });
         else playGameSound({ capture: san.includes("x") });
       }
+      // Opponent (or self) advanced the game — jump to live position
+      setViewIndex(-1);
     }
     prevHistoryLen.current = len;
 
@@ -134,11 +142,28 @@ function OnlinePlayInner() {
       remoteSeq > localSeq &&
       remoteLen === 0 &&
       (data.status.includes("New game") ||
-        data.status.includes("White to move") ||
         data.status.startsWith("Waiting"));
 
     const longerHistory = remoteLen > localLen;
     const newerSeq = remoteSeq > localSeq;
+    const samePosition =
+      remoteLen === localLen && remoteSeq === localSeq;
+
+    // Always refresh status / gameOver when the position matches (e.g. "Both connected")
+    if (!opts?.force && samePosition && !isReset) {
+      const prev = gameRef.current;
+      if (prev.status !== data.status || prev.gameOver !== data.gameOver) {
+        const next: GameState = {
+          ...prev,
+          status: data.status,
+          gameOver: data.gameOver,
+          lastMove: data.lastMove ?? prev.lastMove,
+        };
+        gameRef.current = next;
+        setGame(next);
+      }
+      return;
+    }
 
     if (!opts?.force && remoteLen < localLen && !isReset) return;
     if (!opts?.force && !longerHistory && !newerSeq && !isReset) return;
@@ -156,14 +181,14 @@ function OnlinePlayInner() {
   }, []);
 
   const pollGame = useCallback(
-    async (code: string) => {
+    async (code: string, force = false) => {
       const pid = playerIdRef.current || makePlayerId();
       try {
         const res = await fetch(
           `/api/rooms/${code}?playerId=${encodeURIComponent(pid)}&_=${Date.now()}`,
           { cache: "no-store" }
         );
-        if (res.ok) applyRoom((await res.json()) as PublicRoom);
+        if (res.ok) applyRoom((await res.json()) as PublicRoom, { force });
       } catch {
         /* */
       }
@@ -190,6 +215,7 @@ function OnlinePlayInner() {
 
   function startPolling(code: string, r: "host" | "guest") {
     stopPoll();
+    roleRef.current = r;
     void pollGame(code);
     void sendPresence(code, r);
     pollRef.current = setInterval(() => void pollGame(code), 600);
@@ -205,8 +231,10 @@ function OnlinePlayInner() {
     setViewIndex(-1);
     gameSeqRef.current = 0;
     prevHistoryLen.current = 0;
+    roleRef.current = "host";
 
     const pid = playerIdRef.current || makePlayerId();
+    playerIdRef.current = pid;
     try {
       const res = await fetch("/api/rooms", {
         method: "POST",
@@ -237,8 +265,10 @@ function OnlinePlayInner() {
       setPhase("connecting");
       setStatusLine("Reconnecting…");
       setError("");
+      roleRef.current = r;
 
       const pid = playerIdRef.current || makePlayerId();
+      playerIdRef.current = pid;
       try {
         let data: PublicRoom | null = null;
         for (let i = 0; i < 12; i++) {
@@ -286,8 +316,10 @@ function OnlinePlayInner() {
       setViewIndex(-1);
       gameSeqRef.current = 0;
       prevHistoryLen.current = 0;
+      roleRef.current = "guest";
 
       const pid = playerIdRef.current || makePlayerId();
+      playerIdRef.current = pid;
       try {
         let data: PublicRoom | null = null;
         let lastErr = "Room not found — ask the host to create it again";
@@ -308,8 +340,13 @@ function OnlinePlayInner() {
         }
         if (!data) throw new Error(lastErr);
 
+        // Third browser into a full room: no color assigned
+        if (!data.yourColor && data.playerCount >= 2) {
+          setError("Room is full — you can spectate after the host resets or creates a new room.");
+        }
+
         applyRoom(data, { force: true });
-        setYourColor(data.yourColor || "b");
+        setYourColor(data.yourColor || null);
         bootstrapped.current = true;
         router.replace("/play/online?room=" + data.code);
         startPolling(data.code, "guest");
@@ -348,9 +385,12 @@ function OnlinePlayInner() {
     const mover = chess.turn() === "w" ? "b" : "w";
     if (mover !== yourColor) return;
 
+    const prev = gameRef.current;
+    const prevSeq = gameSeqRef.current;
+
     const optimistic: GameState = {
       fen: newFen,
-      history: [...game.history, move.san],
+      history: [...prev.history, move.san],
       lastMove: { from: move.from, to: move.to },
       status: chess.isCheckmate()
         ? "Checkmate!"
@@ -361,7 +401,7 @@ function OnlinePlayInner() {
             : "Opponent's turn",
       gameOver: chess.isGameOver(),
     };
-    gameSeqRef.current += 1;
+    gameSeqRef.current = prevSeq + 1;
     gameRef.current = optimistic;
     setGame(optimistic);
     setViewIndex(-1);
@@ -382,10 +422,19 @@ function OnlinePlayInner() {
       if (res.ok) {
         applyRoom((await res.json()) as PublicRoom, { force: true });
       } else {
-        void pollGame(roomCode);
+        // Server rejected — roll back optimistic state from server truth
+        gameSeqRef.current = prevSeq;
+        gameRef.current = prev;
+        setGame(prev);
+        await pollGame(roomCode, true);
+        const err = await res.json().catch(() => ({}));
+        if (err.error) setError(String(err.error));
       }
     } catch {
-      void pollGame(roomCode);
+      gameSeqRef.current = prevSeq;
+      gameRef.current = prev;
+      setGame(prev);
+      await pollGame(roomCode, true);
     }
   }
 
@@ -423,6 +472,7 @@ function OnlinePlayInner() {
 
   function leave() {
     stopPoll();
+    roleRef.current = null;
     bootstrapped.current = false;
     gameSeqRef.current = 0;
     setPhase("lobby");
@@ -564,7 +614,7 @@ function OnlinePlayInner() {
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem" }}>
               <span style={{ fontSize: 12, color: "var(--muted)" }}>You are</span>
               <span style={{ fontSize: 14, fontWeight: 600 }}>
-                {yourColor === "w" ? "White" : yourColor === "b" ? "Black" : "…"}
+                {yourColor === "w" ? "White" : yourColor === "b" ? "Black" : "Spectator"}
               </span>
             </div>
 
