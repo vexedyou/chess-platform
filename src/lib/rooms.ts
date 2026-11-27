@@ -1,7 +1,9 @@
 /**
- * Room store for online multiplayer.
- * Game position is versioned with gameSeq so presence pings cannot rewind the board.
+ * Durable room store backed by Vercel Blob (shared across all serverless instances).
+ * Falls back to in-memory when BLOB_READ_WRITE_TOKEN is missing (local dev).
  */
+
+import { put, head, list } from "@vercel/blob";
 
 export type Room = {
   code: string;
@@ -10,13 +12,11 @@ export type Room = {
   lastMove: { from: string; to: string } | null;
   status: string;
   gameOver: boolean;
-  /** Increments only on move / reset — never on presence. */
   gameSeq: number;
   hostId: string;
   guestId: string | null;
   hostSeenAt: number;
   guestSeenAt: number;
-  /** Bumped on any change (presence or game). */
   updatedAt: number;
 };
 
@@ -25,6 +25,7 @@ export const START_FEN =
 
 type GlobalRooms = typeof globalThis & {
   __ppRooms?: Map<string, Room>;
+  __ppRoomUrls?: Map<string, string>;
 };
 
 function mem(): Map<string, Room> {
@@ -33,61 +34,98 @@ function mem(): Map<string, Room> {
   return g.__ppRooms;
 }
 
-function kvEnv(): { url: string; token: string } | null {
-  const url =
-    process.env.KV_REST_API_URL ||
-    process.env.UPSTASH_REDIS_REST_URL ||
-    "";
-  const token =
-    process.env.KV_REST_API_TOKEN ||
-    process.env.UPSTASH_REDIS_REST_TOKEN ||
-    "";
-  if (!url || !token) return null;
-  return { url: url.replace(/\/$/, ""), token };
+function urlCache(): Map<string, string> {
+  const g = globalThis as GlobalRooms;
+  if (!g.__ppRoomUrls) g.__ppRoomUrls = new Map();
+  return g.__ppRoomUrls;
 }
 
-async function kvGet(code: string): Promise<Room | null> {
+function hasBlob(): boolean {
+  return !!process.env.BLOB_READ_WRITE_TOKEN;
+}
+
+function pathFor(code: string): string {
+  return `rooms/${code.toUpperCase()}.json`;
+}
+
+async function blobGet(code: string): Promise<Room | null> {
   const key = code.toUpperCase();
-  const env = kvEnv();
-  if (!env) return mem().get(key) ?? null;
+  if (!hasBlob()) return mem().get(key) ?? null;
+
   try {
-    const res = await fetch(`${env.url}/get/pp:room:${key}`, {
-      headers: { Authorization: `Bearer ${env.token}` },
+    // Prefer cached URL from last write
+    let url = urlCache().get(key);
+
+    if (!url) {
+      const listed = await list({
+        prefix: pathFor(key),
+        limit: 1,
+      });
+      if (listed.blobs.length === 0) {
+        return mem().get(key) ?? null;
+      }
+      url = listed.blobs[0].url;
+      urlCache().set(key, url);
+    }
+
+    // Fetch with token so private blobs are readable; bust CDN with query
+    const res = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
+      },
       cache: "no-store",
     });
-    if (!res.ok) return mem().get(key) ?? null;
-    const data = (await res.json()) as { result?: string | null };
-    if (!data.result) return mem().get(key) ?? null;
-    const room = JSON.parse(data.result) as Room;
+
+    if (!res.ok) {
+      // URL may be stale — re-list
+      urlCache().delete(key);
+      const listed = await list({ prefix: pathFor(key), limit: 1 });
+      if (listed.blobs.length === 0) return mem().get(key) ?? null;
+      url = listed.blobs[0].url;
+      urlCache().set(key, url);
+      const retry = await fetch(
+        `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
+          },
+          cache: "no-store",
+        }
+      );
+      if (!retry.ok) return mem().get(key) ?? null;
+      const room = (await retry.json()) as Room;
+      if (typeof room.gameSeq !== "number") room.gameSeq = room.history?.length ?? 0;
+      mem().set(key, room);
+      return room;
+    }
+
+    const room = (await res.json()) as Room;
     if (typeof room.gameSeq !== "number") room.gameSeq = room.history?.length ?? 0;
-    mem().set(room.code, room);
+    mem().set(key, room);
     return room;
   } catch {
     return mem().get(key) ?? null;
   }
 }
 
-async function kvSet(room: Room): Promise<void> {
-  mem().set(room.code, room);
-  const env = kvEnv();
-  if (!env) return;
+async function blobSet(room: Room): Promise<void> {
+  const key = room.code.toUpperCase();
+  room.code = key;
+  mem().set(key, room);
+
+  if (!hasBlob()) return;
+
   try {
-    await fetch(env.url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify([
-        "SET",
-        `pp:room:${room.code}`,
-        JSON.stringify(room),
-        "EX",
-        "7200",
-      ]),
+    const result = await put(pathFor(key), JSON.stringify(room), {
+      access: "private",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: "application/json",
+      cacheControlMaxAge: 60,
     });
-  } catch {
-    /* memory still holds it on this instance */
+    urlCache().set(key, result.url);
+  } catch (e) {
+    console.error("blobSet failed", e);
   }
 }
 
@@ -101,7 +139,7 @@ export function generateCode(): string {
 export async function createRoom(hostId: string): Promise<Room> {
   let code = generateCode();
   for (let i = 0; i < 8; i++) {
-    const existing = await kvGet(code);
+    const existing = await blobGet(code);
     if (!existing) break;
     code = generateCode();
   }
@@ -120,30 +158,26 @@ export async function createRoom(hostId: string): Promise<Room> {
     guestSeenAt: 0,
     updatedAt: now,
   };
-  await kvSet(room);
+  await blobSet(room);
   return room;
 }
 
 export async function getRoom(code: string): Promise<Room | null> {
-  return kvGet(code);
+  return blobGet(code);
 }
 
 export async function saveRoom(room: Room): Promise<void> {
   room.updatedAt = Date.now();
-  await kvSet(room);
+  await blobSet(room);
 }
 
-/**
- * Update presence only. Does NOT create rooms and never rewinds game state.
- * Returns null if the room does not exist.
- */
+/** Presence only — never creates rooms, never rewinds game state. */
 export async function touchPresence(
   code: string,
   playerId: string,
   role: "host" | "guest"
 ): Promise<Room | null> {
-  const key = code.toUpperCase();
-  const room = await kvGet(key);
+  const room = await blobGet(code);
   if (!room) return null;
 
   const now = Date.now();
@@ -152,13 +186,11 @@ export async function touchPresence(
     if (room.hostId === "unknown" || room.hostId === playerId) {
       room.hostId = playerId;
     }
-    // Only the real host updates hostSeenAt
     if (room.hostId === playerId) room.hostSeenAt = now;
   } else {
     if (room.hostId === playerId) {
       room.hostSeenAt = now;
     } else {
-      // Claim / refresh guest seat
       if (!room.guestId || room.guestId === playerId) {
         room.guestId = playerId;
       }
@@ -166,9 +198,9 @@ export async function touchPresence(
     }
   }
 
-  const guestFresh = !!(room.guestId && now - room.guestSeenAt < 12000);
+  const guestFresh = !!(room.guestId && now - room.guestSeenAt < 15000);
   const hostFresh =
-    room.hostId !== "unknown" && now - room.hostSeenAt < 12000;
+    room.hostId !== "unknown" && now - room.hostSeenAt < 15000;
   if (guestFresh && hostFresh && !room.gameOver) {
     if (
       room.history.length === 0 &&
@@ -178,17 +210,16 @@ export async function touchPresence(
     }
   }
 
-  // Presence only — do not bump gameSeq
   room.updatedAt = now;
-  await kvSet(room);
+  await blobSet(room);
   return room;
 }
 
 export function publicRoom(room: Room, playerId: string) {
   const now = Date.now();
-  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 12000);
+  const guestOnline = !!(room.guestId && now - room.guestSeenAt < 15000);
   const hostOnline =
-    room.hostId !== "unknown" && now - room.hostSeenAt < 12000;
+    room.hostId !== "unknown" && now - room.hostSeenAt < 15000;
 
   let yourColor: "w" | "b" | null = null;
   if (playerId === room.hostId) yourColor = "w";
@@ -207,3 +238,6 @@ export function publicRoom(room: Room, playerId: string) {
     updatedAt: room.updatedAt,
   };
 }
+
+// silence unused import warning if head is tree-shaken differently
+void head;
