@@ -39,8 +39,8 @@ export default function ChessBoard({
   const [moveFrom, setMoveFrom] = useState<string | null>(null);
   const [moveTo, setMoveTo] = useState<string | null>(null);
   const [showPromotion, setShowPromotion] = useState(false);
-  const [rightClicked, setRightClicked] = useState<{}
-    | Record<string, React.CSSProperties>
+  const [rightClicked, setRightClicked] = useState<
+    Record<string, React.CSSProperties>
   >({});
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
@@ -174,8 +174,7 @@ export default function ChessBoard({
 
   function onPieceDrop(sourceSquare: string, targetSquare: string) {
     if (!interactive) return false;
-    const ok = makeMove(sourceSquare, targetSquare, "q");
-    return ok;
+    return makeMove(sourceSquare, targetSquare, "q");
   }
 
   // Build square styles
@@ -221,13 +220,15 @@ export default function ChessBoard({
         onPieceDrop={onPieceDrop}
         onSquareRightClick={(square) => {
           const colour = "rgba(0, 0, 255, 0.4)";
-          setRightClicked((prev) => ({
-            ...prev,
-            [square]:
-              prev[square] && prev[square]?.backgroundColor === colour
-                ? undefined
-                : { backgroundColor: colour },
-          }));
+          setRightClicked((prev) => {
+            const next = { ...prev };
+            if (prev[square]?.backgroundColor === colour) {
+              delete next[square];
+            } else {
+              next[square] = { backgroundColor: colour };
+            }
+            return next;
+          });
         }}
         customSquareStyles={styles}
         boardOrientation={orientation}
